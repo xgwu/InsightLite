@@ -119,6 +119,23 @@ def seg_a():
           r.status_code == 200
           and r.json()["datasets"]["payroll"]["fields"]["net_pay"]["sensitivity"] == "critical")
 
+    print("== A auditor 裁决路径（2026-09-19：public=allow） ==")
+    tok_aud = sso_mock.issue("5001", "auditor", 1, [1])      # 裁决后白名单可签发
+    r = client.post("/query", headers=_auth(tok_aud),
+                    json={"smq": {"dataset": "department", "columns": ["name"]}})
+    body = r.json()
+    check("A8 auditor department(public) -> 200 ALLOW",
+          r.status_code == 200 and body["decision"] == "ALLOW",
+          f"{r.status_code} {body.get('decision')} {body.get('reason','')[:60]}")
+    check("A8 auditor department 行数 == 全表", body.get("total") == 14,
+          f"got {body.get('total')}")
+    r = client.post("/query", headers=_auth(tok_aud),
+                    json={"smq": {"dataset": "payroll", "columns": ["pay_month"]}})
+    body = r.json()
+    check("A8 auditor payroll(internal) -> denied",
+          r.status_code == 200 and body["status"] == "denied" and body["decision"] == "DENY",
+          f"{r.status_code} {body.get('status')}")
+
 
 if __name__ == "__main__":
     seg_a()

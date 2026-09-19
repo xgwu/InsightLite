@@ -6,10 +6,14 @@ ChatBI-Lite W4 · 权限策略引擎 v1（dev-plan.html C5）
 输入：合法 SMQ（调用方必须先过 smq_schema.validate）+ securityContext（role 必填）。
 策略来源：semantic_model/hr_domain_v1.yaml 的 roles / permission_matrix / 字段 sensitivity（dsl-v1.html 第 5 节）。
 
-v1 硬规则（dsl-v1.html 6.5，W7 权限矩阵验收直接引用）：
+v1 硬规则（dsl-v1.html 6.5 + 2026-09-19 裁决，W7 权限矩阵验收直接引用）：
   R1 critical 字段不开放 sum —— 已由 smq_schema allowed_aggs 收口（这里不重复）
   R2 critical 字段出现在 order_by 且角色非 hr_admin -> DENY
   R3 critical 字段出现在 filter   且角色非 hr_admin -> DENY
+  R5 critical/sensitive 字段出现在 group_by 且角色非 hr_admin -> DENY（裁决新增：
+     group_by 取值本身即输出，独立于「决策==遮蔽」判定）
+scope=none 角色（auditor）：可访问纯 public 引用查询（裁决：matrix.public.auditor=allow 生效），
+  任何非 public 字段引用整查询 DENY；个人行数据集 row_cond 显式空集。
 列级 MASK：sensitive/critical 字段对 dept_manager 角色以 NULL 输出（Cube Spike T2 语义，升级为生成器保证）。
 employee 角色：行级策略已限定本人行，本人数据明文（OQ2 决策）；不额外 MASK。
 """
@@ -98,20 +102,32 @@ def mask_fields(ds: str, role: str, fields):
 
 def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
     """三态决策主入口。smq 必须已通过 smq_schema.validate（内部不重复校验，缺 dataset 即 DENY）。
-    conn 可选：R4 需要把 filter 里的姓名与本人姓名比对；不传则按需自开连接。"""
+    conn 可选：R4 需要把 filter 里的姓名与本人姓名比对；不传则按需自开连接。
+    2026-09-19 裁决落地：① scope=none 角色（auditor）可访问纯 public 引用查询；
+    ② 新增 R5 硬规则（critical/sensitive 进 group_by 且非 hr_admin -> 整查询 DENY）。"""
     version = dsl_loader.REG.version
     role = ctx.get("role")
     if role not in dsl_loader.REG.roles:                       # 未登录 / 伪造角色：主验证面
         return {"decision": "DENY", "reason": f"unknown role: {role!r}", "model_version": version}
-    if dsl_loader.REG.roles[role].get("scope") == "none":      # 显式无范围：全 DENY（fail-closed 缺省）
-        return {"decision": "DENY", "reason": f"role {role!r} has scope=none", "model_version": version}
     ds = smq.get("dataset")
     if ds not in dsl_loader.REG.tables:
         return {"decision": "DENY", "reason": f"unknown dataset: {ds!r}", "model_version": version}
 
     order_fields = _fields_in(smq, "order_by")
     filter_fields = [f.get("field") for f in smq.get("filter") or []]
-    out_fields = _fields_in(smq, "columns") + [g for g in smq.get("group_by") or []]
+    group_fields = [g for g in smq.get("group_by") or []]
+    out_fields = _fields_in(smq, "columns") + group_fields
+
+    # scope=none（auditor）：public 档可看（矩阵 public.auditor=allow，2026-09-19 裁决生效）；
+    # 任何非 public 字段引用（含 filter/order_by/group_by 间接引用）整查询 DENY（fail-closed）。
+    # 未知字段 _sens_of 缺省 internal -> DENY，同样 fail-closed。
+    if dsl_loader.REG.roles[role].get("scope") == "none":
+        referenced = set(order_fields) | set(filter_fields) | set(out_fields)
+        non_public = [f for f in sorted(referenced) if _sens_of(ds, f) != "public"]
+        if non_public:
+            return {"decision": "DENY",
+                    "reason": f"scope=none role {role!r}: non-public fields {non_public}",
+                    "model_version": version}
 
     # R2/R3：critical 的排序/过滤对非 hr_admin 整查询拒绝
     if role != _ADMIN:
@@ -122,6 +138,14 @@ def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
         for f in filter_fields:
             if _sens_of(ds, f) == "critical":
                 return {"decision": "DENY", "reason": f"R3: critical field {f!r} in filter",
+                        "model_version": version}
+        # R5（2026-09-19 裁决）：critical/sensitive 进 group_by 对非 hr_admin 整查询拒绝。
+        # 独立于「本轮是否有列被遮蔽」判定——group_by 取值本身即输出（纪律 13），
+        # 若挂在 MASK 决策之下，「聚合放行」类分级会让该格静默变为可利用面。
+        for f in group_fields:
+            if _sens_of(ds, f) in ("critical", "sensitive"):
+                return {"decision": "DENY",
+                        "reason": f"R5: sensitive field {f!r} in group_by",
                         "model_version": version}
 
     # R4（W4 落地，OQ2 配套）：employee 角色指名道姓查「他人」-> DENY。

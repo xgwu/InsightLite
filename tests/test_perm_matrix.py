@@ -132,12 +132,10 @@ def run_chain(smq, ctx, conn):
 def seg_a_decision():
     seg = "A决策层"
     # A1: 矩阵逐格（数据集 × 代表字段 × 角色）
-    # auditor 豁免逐格断言：权威内部矛盾（matrix.public.auditor=allow vs roles.auditor.scope=none，
-    # 实际被 scope=none 短路全 DENY）——按纪律 2 登记冲突不裁决，见冲突报告 [C3]。
+    # 2026-09-19 裁决后 auditor 的 public=allow 已生效（scope=none 仅放行纯 public 引用），
+    # 全格断言无豁免；原 [C3] 权威矛盾已消解。
     for (ds, sens), field in REPRESENTATIVE.items():
         for role in ROLES:
-            if role == "auditor" and expected_verdict_from_authority(role, sens) != "DENY":
-                continue
             smq = {"dataset": ds, "columns": [field]}
             v = P.decide(smq, CTX[role])
             exp = expected_verdict_from_authority(role, sens)
@@ -184,6 +182,50 @@ def seg_a_decision():
         check(seg, "A5 种子库存在重名（R4 语义前提）", dup[1] >= 2, f"{dup[0]}×{dup[1]}")
     else:
         check(seg, "A5 种子库存在重名（R4 语义前提）", False, "无重名，R4 对照失去证据")
+
+    # A6: R5（2026-09-19 裁决）—— critical/sensitive 进 group_by 且非 hr_admin -> 整查询 DENY
+    # auditor 不在本组：其拒绝由 scope-none 的 public 门先行归因（A7 覆盖），
+    # R5 归因仅对有行级范围的受限期角色断言。
+    for role in ("employee", "dept_manager"):
+        smq = {"dataset": "payroll",
+               "columns": [{"field": "net_pay", "agg": "count"}],
+               "group_by": ["net_pay"]}
+        v = P.decide(smq, CTX[role])
+        check(seg, f"A6 R5 {role} group_by(net_pay) -> DENY", v["decision"] == "DENY"
+              and "R5" in v.get("reason", ""), f"got {v['decision']} ({v.get('reason','')})")
+    smq = {"dataset": "payroll",
+           "columns": [{"field": "net_pay", "agg": "count"}],
+           "group_by": ["net_pay"]}
+    v = P.decide(smq, CTX["hr_admin"])
+    check(seg, "A6 R5 hr_admin group_by(net_pay) 不受限", v["decision"] == "ALLOW",
+          f"got {v['decision']}")
+    # R5 判据域：group_by 内部字段（非 critical/sensitive）不受影响（误伤侧对照）
+    smq = {"dataset": "payroll",
+           "columns": [{"field": "emp_id", "agg": "count"}],
+           "group_by": ["pay_month"]}
+    v = P.decide(smq, CTX["dept_manager"])
+    check(seg, "A6 R5 非敏感 group_by(pay_month) 不受影响", v["decision"] == "ALLOW",
+          f"got {v['decision']}")
+
+    # A7: auditor 裁决落地——public 档可看（不再被 scope=none 短路全拒）
+    v = P.decide({"dataset": "department", "columns": ["name"]}, CTX["auditor"])
+    check(seg, "A7 auditor department.name(public) -> ALLOW", v["decision"] == "ALLOW",
+          f"got {v['decision']} ({v.get('reason','')})")
+    v = P.decide({"dataset": "department", "columns": ["name"],
+                  "filter": [{"field": "name", "op": "eq", "value": "技术部"}]},
+                 CTX["auditor"])
+    check(seg, "A7 auditor public 过滤查询 -> ALLOW", v["decision"] == "ALLOW",
+          f"got {v['decision']}")
+    v = P.decide({"dataset": "payroll", "columns": ["pay_month"]}, CTX["auditor"])
+    check(seg, "A7 auditor payroll(internal) -> DENY", v["decision"] == "DENY",
+          f"got {v['decision']}")
+    # 非 public 字段经 filter 间接引用同样拒绝（fail-closed 完整性；
+    # department 数据集全字段 public，故换 employee 数据集以 internal 字段做过滤）
+    v = P.decide({"dataset": "employee", "columns": ["name"],
+                  "filter": [{"field": "name", "op": "eq", "value": "王伟"}]},
+                 CTX["auditor"])
+    check(seg, "A7 auditor employee 查询引用 internal 过滤字段 -> DENY",
+          v["decision"] == "DENY", f"got {v['decision']}")
 
 
 # ================================================================ B fail-closed 段
@@ -334,6 +376,15 @@ def seg_c_behavior():
 
         # C7 种子库未被污染（纪律 7）
         check(seg, "C7 种子库未被污染", _sha256(SEED_DB) == seed_sha_before)
+
+        # C8 auditor public 档行为层（裁决落地）：department 全表正常返回、行数 == 全表
+        smq = {"dataset": "department", "columns": ["name"]}
+        v, sql, rows = run_chain(smq, CTX["auditor"], conn)
+        n_dept = conn.execute("SELECT COUNT(*) FROM department").fetchone()[0]
+        ok = (v["decision"] == "ALLOW" and rows is not None and len(rows) == n_dept
+              and not (v.get("policy") or {}).get("row_cond"))
+        check(seg, "C8 auditor department 全表返回且不注入 row_cond", ok,
+              f"rows={len(rows) if rows is not None else None}/{n_dept}")
     finally:
         conn.close()
         os.unlink(path)
@@ -381,7 +432,9 @@ def seg_d_authority():
 
     # D4 权威声明的规则都有实现落点（声明即兑现，静态核对）
     hard = AUTH["permission_matrix"]["hard_rules"]
-    check(seg, "D4 权威硬规则 3 条与引擎 R1-R3 对应", len(hard) == 3, str(len(hard)))
+    check(seg, "D4 权威硬规则 4 条与引擎 R1/R2/R3/R5 对应", len(hard) == 4, str(len(hard)))
+    check(seg, "D4 R5 已写入权威（2026-09-19 裁决）",
+          any("R5" in h and "group_by" in h for h in hard))
 
 
 def _matrix_diff(a, b):
@@ -396,41 +449,40 @@ def _matrix_diff(a, b):
 # ================================================================ E 冲突报告段
 def seg_e_conflicts():
     print("\n" + "=" * 72)
-    print("E 冲突报告（只登记、不裁决、不断言——纪律 2）")
+    print("E 冲突报告（裁决日志：谁、何时、为什么——纪律 2/流程 6）")
     print("=" * 72)
     print("""
-[C1] SSO 角色名 vs 权限引擎角色名不一致
-  - 引文 A：backend/core/sso_mock.py  ROLES = {employee, manager, hrbp, exec}
-  - 引文 B：semantic_model/hr_domain_v1.yaml roles = {employee, dept_manager, hr_admin, auditor}
-  - 待裁决：API 层的 SSO->策略角色映射表（W7 骨架暂按
-    employee->employee / manager->dept_manager / hrbp->hr_admin / exec->hr_admin
-    fail-closed 兜底，未登记映射一律 403），需发起人确认后写入 docs/adr。
-  - 影响面：/query /ask 鉴权；exec 是否可见全员薪酬属薪酬敏感面。""")
+[C1] SSO 角色名 vs 权限引擎角色名不一致 —— ✅ 已裁决（2026-09-19，Kenny）
+  - 原冲突：sso_mock ROLES {employee,manager,hrbp,exec} vs YAML roles
+    {employee,dept_manager,hr_admin,auditor}
+  - 裁决内容：映射表定版（backend/api/config.py）
+    employee->employee / manager->dept_manager / hrbp->hr_admin /
+    exec->hr_admin（exec 可见全员薪酬）/ auditor->auditor（scope=none）
+  - 落地：sso_mock 白名单补 auditor；未登记映射仍 403（fail-closed）
+  - 断言落点：tests/test_api_smoke.py（鉴权路径）
 
-    print(f"""
-[C2] 敏感列 group_by 未被硬规则覆盖（纪律 13：取值本身即输出）
-  - 引文 A：YAML hard_rules 只列 R1(sum)/R2(order_by)/R3(filter)
-  - 引文 B：perm_engine 对 group_by 字段仅计入 mask_fields（MASK 输出列），
-    GROUP BY 仍按真值列分组——输出组数即「敏感列有多少个不同取值」
-  - 待裁决：是否新增硬规则 R5（critical/sensitive 进 group_by 且非 hr_admin -> 整查询 DENY），
-    并同步写回 YAML hard_rules（先改权威，再改实现——流程 3/4）。
-  - 影响面：原登记开放缺陷 D-3（P1），阻断关系：M7「越权路径 0 条存活」在 D-3 修复前不成立。
-    裁决落地时必须同步补 R5 决策层断言。""")
+[C2] 敏感列 group_by 未被硬规则覆盖（纪律 13） —— ✅ 已裁决（2026-09-19，Kenny）
+  - 原缺陷 D-3：非 admin 对 critical 列 group_by 得 MASK，GROUP BY 按真值分组，
+    组数泄漏取值基数
+  - 裁决内容：新增硬规则 R5（critical/sensitive 进 group_by 且非 hr_admin ->
+    整查询 DENY），已写入 YAML hard_rules（先改权威再改实现）
+  - 落地：perm_engine.decide() R5 检查；D-3 移入 RESOLVED_DEFECTS
+  - 断言落点：A6 决策层（含误伤侧对照：非敏感 group_by 不受影响）
 
-    print("""
-[C3] 权威内部矛盾：roles.auditor.scope=none vs permission_matrix.public.auditor=allow
-  - 引文 A：YAML roles.auditor: scope: none（「显式空集，拒绝一切」）
-  - 引文 B：YAML permission_matrix.defaults.public.auditor: allow
-  - 实际行为：decide() 先按 scope=none 短路全 DENY，矩阵的 public/auditor=allow 格永远不可达
-  - 待裁决：auditor 是否应可见 public 数据（如部门架构）？若是 -> 改 roles.auditor.scope
-    或在 decide 中放行 public 档（先改权威再改实现，流程 3/4）；若否 -> 修订矩阵该格为 deny。
-  - 影响面：矩阵 A1 段对 auditor 非 DENY 期望格暂不断言（本条登记即覆盖）。""")
+[C3] 权威内部矛盾：roles.auditor.scope=none vs matrix.public.auditor=allow
+  —— ✅ 已裁决（2026-09-19，Kenny）
+  - 裁决内容：auditor 应可见 public 档（部门架构类数据），matrix 格生效；
+    scope=none 语义修订为「非 public 引用一律 DENY，纯 public 引用放行」
+  - 落地：YAML roles.auditor 注释更新；decide() scope-none 分支重写
+    （引用集 order/filter/columns/group_by 任一非 public 即拒）
+  - 断言落点：A1 全格无豁免 + A7 决策层 4 条 + C8 行为层
+  - 影响面：sso_mock 白名单补 auditor，SSO->映射 auditor->auditor 已通""")
 
 
 # ================================================================ 缺陷登记表
 KNOWN_DEFECTS = {
-    # W7 接线修复后开放缺陷清零；纪律 13 的 group_by 缺口（原登记 D-3，P1）见冲突报告 [C2]，
-    # 裁决落地（先改 YAML hard_rules 权威，再改 decide 加 R5）时必须同步补决策层断言。
+    # 2026-09-19 三项裁决（ADR-D5 映射定版 / R5 硬规则 / auditor public=allow）全部落地后开放缺陷清零。
+    # 新增权限面/遮蔽字段时必须同步补行为层断言，否则视同未完成（纪律 8 风险登记条款）。
 }
 
 RESOLVED_DEFECTS = {
@@ -438,6 +490,8 @@ RESOLVED_DEFECTS = {
            "（值列 NULL AS / 聚合列 MAX(NULL) AS，纪律 23），ask()/_answer_compare 消费；C3 转硬断言",
     "D-2": "2026-09-19 W7 接线修复：decide() 产出 policy.row_cond（row_policy 变 ds-aware 行锚点"
            " t/e/None，纪律 8），编译期注入 WHERE；缺主体上下文双 fail-closed DENY；C2/C5 转硬断言",
+    "D-3": "2026-09-19 裁决落地（R5 硬规则）：critical/sensitive 进 group_by 且非 hr_admin -> 整查询"
+           " DENY；已写入 YAML hard_rules + decide()；A6 决策层断言（含误伤侧对照）",
 }
 
 

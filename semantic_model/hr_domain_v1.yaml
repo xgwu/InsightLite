@@ -25,7 +25,8 @@ roles:
     row_expr: null                                  # 无行级约束
   auditor:
     scope: none
-    row_expr: "1 = 0"                               # 显式空集，拒绝一切
+    row_expr: "1 = 0"                               # 个人行数据集显式空集；public 档可看（2026-09-19 裁决，
+                                                    # permission_matrix.public.auditor=allow 生效，见 hard_rules 下注）
 
 # ---------------------------------------------------------------- 实体
 entities:
@@ -333,6 +334,8 @@ time_semantics:
 
 # ---------------------------------------------------------------- 权限矩阵
 # 缺省 DENY：矩阵外格子一律拒绝。详见 dsl-v1.html 第 5 节。
+# 2026-09-19 裁决（Kenny）：① public.auditor=allow 生效——scope=none 的角色仅可访问
+# 纯 public 引用的查询；② 新增硬规则 R5（敏感列 group_by 整查询拒绝）。
 permission_matrix:
   sensitivities: [public, internal, sensitive, critical]
   defaults:
@@ -344,3 +347,5 @@ permission_matrix:
     - "critical 字段不开放 sum 聚合（allowed_aggs 已收口）"
     - "critical 字段出现在 order_by 且角色非 hr_admin → 整查询 DENY"
     - "critical 字段出现在 filter 且角色非 hr_admin → 整查询 DENY"
+    - "R5: critical/sensitive 字段出现在 group_by 且角色非 hr_admin → 整查询 DENY（2026-09-19 裁决；
+       group_by 取值本身即输出，不能挂在「决策==遮蔽」之下）"

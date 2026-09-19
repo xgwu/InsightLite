@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """W7 API · 配置（零外部依赖：环境变量 + 常量）。
 
-SSO_ROLE_MAP 的冲突背景（tests/test_perm_matrix.py 冲突报告 [C1]）：
-  sso_mock 签发角色 = employee / manager / hrbp / exec（Sprint 0 五角色遗留命名）
+SSO_ROLE_MAP（2026-09-19 发起人裁决定版，见 docs/adr/OPEN-DECISIONS.md 已收口）：
+  sso_mock 签发角色 = employee / manager / hrbp / exec / auditor
   权限引擎策略角色 = employee / dept_manager / hr_admin / auditor（YAML 权威）
   映射表是两者的唯一缝合点：
     - 未登记的 SSO 角色 -> 403（fail-closed，绝不默认放行）
-    - manager->dept_manager / hrbp->hr_admin 为明显对位
-    - exec->hr_admin 为暂定值（exec 可见全员薪酬属薪酬敏感面）——待发起人
-      确认后写入 docs/adr（ADR-D5）；裁决变更只改本表，引擎与矩阵不动。
+    - manager->dept_manager / hrbp->hr_admin / exec->hr_admin（裁决确认）
+    - auditor->auditor：scope=none，仅可访问纯 public 引用查询（裁决确认）
 """
 import os
 import sys
@@ -17,12 +16,13 @@ CORE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 if CORE not in sys.path:
     sys.path.insert(0, CORE)
 
-# SSO 角色 -> 策略角色（暂定映射，见上）
+# SSO 角色 -> 策略角色（2026-09-19 裁决定版）
 SSO_ROLE_MAP = {
     "employee": "employee",
     "manager": "dept_manager",
     "hrbp": "hr_admin",
-    "exec": "hr_admin",          # 暂定，待裁决（ADR-D5）
+    "exec": "hr_admin",          # 裁决确认：exec 可见全员薪酬
+    "auditor": "auditor",        # 裁决确认：scope=none，仅 public 档可看
 }
 
 # 环境配置
