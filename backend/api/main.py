@@ -29,6 +29,7 @@ import sqlite3  # noqa: E402
 
 from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 import audit as A  # noqa: E402
 import compiler as C  # noqa: E402
@@ -153,13 +154,20 @@ def sse_events(question: str, ctx: dict, api_key: str, intent_fn=None,
     try:
         yield fmt({"stage": "intent"})
         if intent_fn is None:
+            import prefs as PREF                        # W13: 个人时间偏好注入
+            hint = PREF.hint(ctx.get("emp_id"))
             try:
                 import orchestrator as O
-                intent_fn = lambda q: O.interpret(q, api_key)          # D3 路径
+                intent_fn = lambda q: O.interpret(q, api_key, prefs_hint=hint)   # D3 路径
             except ImportError:                                        # 框架缺失 -> 旧路径
                 import llm_intent as L
                 intent_fn = lambda q: R._interpret(L.call_deepseek(q, api_key))
-        kind, payload = intent_fn(question)
+        try:
+            kind, payload = intent_fn(question)
+        except Exception as e:                          # W13 稳定性：意图层崩溃 -> error 事件，
+            yield fmt({"stage": "final", "status": "error",   # 流正常收尾而非中途断死
+                       "text": f"查询失败（意图解析异常：{type(e).__name__}）：{str(e)[:150]}"})
+            return
         if kind == "refused_scope":
             Q.record("sse-final", ctx, "refused_scope", None)          # W11: 未执行也计入分母
             yield fmt({"stage": "final", "status": "refused_scope",
@@ -167,8 +175,11 @@ def sse_events(question: str, ctx: dict, api_key: str, intent_fn=None,
             return
         if kind == "clarify":
             Q.record("sse-final", ctx, "clarify", None)
+            default = payload.get("default")            # W13: 一键默认项
             opts = "".join(f"\n- {o}" for o in payload["options"])
-            yield fmt({"stage": "final", "status": "clarify",
+            if default:
+                opts += f"\n- ★缺省建议：{default}（可一键采纳）"
+            yield fmt({"stage": "final", "status": "clarify", "default": default,
                        "text": f"为了给您准确的答案，请先确认：{payload['question']}{opts}"})
             return
         if kind == "invalid":
@@ -227,6 +238,31 @@ def dev_login(req: DevLoginRequest):
 from dashboard import router as dashboard_router  # noqa: E402
 
 app.include_router(dashboard_router)
+
+# ---------------------------------------------------------------- W13: 个人偏好（FR-17 修订版）
+import prefs as PREF  # noqa: E402
+
+
+@app.get("/me/preferences")
+def get_preferences(ctx: dict = Depends(build_ctx)):
+    """个人偏好（仅本人：emp_id 键，无任何跨用户读取端点——偏好是个人 UI 级数据）。"""
+    return {"preferences": PREF.get(ctx.get("emp_id")),
+            "allowed_scopes": {s: PREF.LABELS[s] for s in PREF.SCOPES}}
+
+
+class PrefsIn(BaseModel):
+    default_time_scope: str = ""
+
+
+@app.put("/me/preferences")
+def put_preferences(req: PrefsIn, ctx: dict = Depends(build_ctx)):
+    """设置/清除默认时间范围。值走白名单枚举（该值会被拼进系统提示词——
+    枚举外一律 422，杜绝自由文本提示词注入面）。"""
+    try:
+        return {"preferences": PREF.set_scope(ctx.get("emp_id"), req.default_time_scope)}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
 
 # W10 连接器路由 + FR-12 审计可操作入口 +（可选）定时同步调度线程
 from connectors import router as connectors_router  # noqa: E402

@@ -27,6 +27,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dsl_loader                                    # noqa: E402  C6: 提示词由 DSL 自动拼装
 
 SYSTEM_PROMPT = dsl_loader.REG.build_system_prompt()
+
+# W13 澄清规则附录：缺省建议必须给（一键默认项的数据契约），且缺省必须带 ★ 标记
+CLARIFY_RULE = (
+    "\n\n【澄清规则（W13）】当需要澄清反问时：options 给出 2-4 个候选，"
+    "并从中指定一个最可能的缺省建议放入 default 字段（语言与选项一致，"
+    "例如「上个月」）；不要在 question 里重复 options。"
+)
+
+
+def build_instructions(prefs_hint: str = "") -> str:
+    """系统提示词 = DSL 自动拼装（C6）+ 澄清缺省规则 + 可选的个人时间偏好注入。
+    prefs_hint 来自 prefs.hint()（白名单枚举内插值，无自由文本 -> 无注入面）。"""
+    return SYSTEM_PROMPT + CLARIFY_RULE + (("\n\n" + prefs_hint) if prefs_hint else "")
 MODEL_NAME = os.environ.get("LLM_MODEL", "deepseek-chat")
 BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
 
@@ -51,10 +64,12 @@ class RefuseScope(BaseModel):
 
 
 class ClarifyOutput(BaseModel):
-    """澄清反问——绝不携带查询字段（fail-closed：澄清分支永远不执行查询）。"""
+    """澄清反问——绝不携带查询字段（fail-closed：澄清分支永远不执行查询）。
+    W13 一键默认项：default 是给缺省建议（用户可一键采纳），不是查询参数。"""
     clarify: Literal[True]
     question: str
     options: list[str] = []
+    default: Optional[str] = None                   # ★缺省建议（一键采纳）
 
 
 OutputSpec = Union[SmqOutput, RefuseScope, ClarifyOutput]
@@ -71,11 +86,14 @@ def build_model(api_key: str, model_name: str = None, base_url: str = None):
 
 
 def build_agent(api_key: str = None, output_type=OutputSpec, model=None,
-                model_name: str = None, base_url: str = None):
-    """Agent 工厂。model 可注入（TestModel 离线测试）；线上传 api_key 走 OpenAI 兼容端点。"""
+                model_name: str = None, base_url: str = None,
+                instructions: str = None):
+    """Agent 工厂。model 可注入（TestModel 离线测试）；线上传 api_key 走 OpenAI 兼容端点。
+    instructions 可注入（W13 个人偏好；缺省 = build_instructions()）。"""
     from pydantic_ai import Agent
     return Agent(model or build_model(api_key, model_name, base_url),
-                 output_type=output_type, instructions=SYSTEM_PROMPT)
+                 output_type=output_type,
+                 instructions=instructions or build_instructions())
 
 
 # ---------------------------------------------------------------- 契约分派（与 render._interpret 对齐）
@@ -85,7 +103,8 @@ def _to_contract(obj) -> tuple:
         return ("refused_scope", obj.reason)
     if isinstance(obj, ClarifyOutput):
         return ("clarify", {"question": str(obj.question).strip(),
-                            "options": [str(o) for o in obj.options]})
+                            "options": [str(o) for o in obj.options],
+                            "default": (str(obj.default).strip() if obj.default else None)})
     if isinstance(obj, SmqOutput):
         return ("smq", obj.model_dump(exclude_none=True))
     return ("invalid", f"unexpected output type {type(obj).__name__}")
@@ -100,9 +119,10 @@ def interpret_with(agent, question: str) -> tuple:
     return _to_contract(result.output)
 
 
-def interpret(question: str, api_key: str) -> tuple:
-    """线上入口：LLM 意图 -> (kind, payload)。"""
-    return interpret_with(build_agent(api_key), question)
+def interpret(question: str, api_key: str, prefs_hint: str = "") -> tuple:
+    """线上入口：LLM 意图 -> (kind, payload)。prefs_hint 注入个人时间偏好（W13）。"""
+    agent = build_agent(api_key, instructions=build_instructions(prefs_hint))
+    return interpret_with(agent, question)
 
 
 if __name__ == "__main__":

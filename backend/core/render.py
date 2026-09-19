@@ -115,7 +115,11 @@ def _interpret(raw):
         q = str(obj.get("question") or "").strip()
         if not q:
             return "invalid", "clarify=true 但缺 question"
-        return "clarify", {"question": q, "options": [str(o) for o in (obj.get("options") or [])]}
+        # W13: default 是缺省建议（一键采纳用），不是查询参数——透传但永不进 SMQ
+        return "clarify", {"question": q,
+                           "options": [str(o) for o in (obj.get("options") or [])],
+                           "default": (str(obj.get("default")).strip()
+                                       if obj.get("default") else None)}
     return "smq", obj
 
 
@@ -194,17 +198,23 @@ def ask(question: str, api_key: str, ctx: dict, conn: sqlite3.Connection = None)
     try:
         try:
             import orchestrator as O
-            kind, payload = O.interpret(question, api_key)             # 环节1: D3 PydanticAI 意图
+            import prefs as PREF                       # W13: 个人时间偏好注入
+            kind, payload = O.interpret(question, api_key,
+                                        prefs_hint=PREF.hint(ctx.get("emp_id")))
         except ImportError:                                            # 框架未安装 -> 旧路径降级
             import llm_intent as L
             raw = L.call_deepseek(question, api_key)                   # 环节1: LLM 意图
             kind, payload = _interpret(raw)                            # 环节1b: 契约分派
+            # 注：降级路径（框架缺失）不注入个人偏好——W13 偏好仅 PydanticAI 路径承载
         if kind == "refused_scope":
             return {"status": "refused_scope",
                     "text": f"该问题超出了当前数据范围，无法回答：{payload}"}
         if kind == "clarify":
             opts = "".join(f"\n- {o}" for o in payload["options"])
-            return {"status": "clarify",
+            default = payload.get("default")
+            if default:
+                opts += f"\n- ★缺省建议：{default}（回复「{default}」或点一键采纳）"
+            return {"status": "clarify", "default": default,
                     "text": f"为了给您准确的答案，请先确认：{payload['question']}{opts}"}
         if kind == "invalid":
             return {"status": "error", "text": f"查询失败（意图解析异常）：{payload}"}

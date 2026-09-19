@@ -27,8 +27,10 @@ from main import DB_PATH, _execute
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
-STORE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), "data", "dashboard.json")
+STORE = os.environ.get("INSIGHTLITE_DASHBOARD_STORE", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "dashboard.json"))
+MAX_WIDGETS = 50                            # W13 稳定性：看板容量上限（防无界增长拖垮读取）
 _LOCK = threading.Lock()                     # 进程内串行化（v1 单机足够）
 
 CHARTS = ("bar", "line", "pie", "table")
@@ -71,6 +73,10 @@ def add_widget(req: WidgetIn, ctx: dict = Depends(build_ctx)):
         raise HTTPException(status_code=422, detail=f"invalid SMQ: {e}")
     with _LOCK:
         widgets = _load()
+        if len(widgets) >= MAX_WIDGETS:
+            raise HTTPException(status_code=409,
+                                detail=f"dashboard is full ({MAX_WIDGETS} widgets); "
+                                       f"please clean up before adding")
         w = {"id": uuid.uuid4().hex[:12], "title": req.title.strip(),
              "smq": req.smq, "chart": req.chart,
              "layout": {"x": 0, "y": 0, "w": 6, "h": 8},

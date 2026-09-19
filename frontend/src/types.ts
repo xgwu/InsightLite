@@ -14,6 +14,7 @@ export interface QueryResult {
   smq?: Record<string, unknown>;
   total?: number;
   data?: QueryData;
+  default?: string | null;   // W13: 澄清缺省建议（一键采纳）
 }
 
 export type Stage = "intent" | "permission" | "execute" | "final";

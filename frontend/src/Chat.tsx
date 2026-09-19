@@ -117,7 +117,16 @@ export function Chat({ onLogout, onGoDashboard, drillContext, onConsumeDrill }: 
               {m.error ? (
                 <Alert type="error" showIcon message={m.error} />
               ) : m.result ? (
-                <ResultCard result={m.result} question={m.question} onAddToDashboard={handleAddToDashboard} />
+                <>
+                  <ResultCard result={m.result} question={m.question} onAddToDashboard={handleAddToDashboard} />
+                  {m.result.status === "clarify" && m.result.default && m.question && (
+                    <Button size="small" type="primary" ghost style={{ marginTop: 8 }}
+                      disabled={busy}
+                      onClick={() => send(`${m.question}（${m.result!.default}）`)}>
+                      一键采纳缺省：{m.result.default}
+                    </Button>
+                  )}
+                </>
               ) : (
                 <Steps size="small" direction="vertical"
                   current={STAGE_INDEX[(m.stage ?? "intent") as Stage]}
