@@ -19,3 +19,6 @@ backend/core/_llm10_result.json
 
 # TS 构建产物
 *.tsbuildinfo
+
+# LLM 实跑探针证据（本地保留）
+backend/core/_w8_live_probes.json
