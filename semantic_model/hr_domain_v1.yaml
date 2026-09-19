@@ -1,0 +1,346 @@
+# =============================================================================
+# ChatBI-Lite 语义模型 DSL v1 — HR 数据域（2026-09-16 评审收口）
+# OQ1 payroll 已落库（798 行）；OQ2 本人查本人薪资放行；OQ5 启动加载不热更。
+# 消费方：smq_schema.py（校验）/ compiler.py（编译）/ llm_intent.py（提示词）
+# 规则：本文件没写的字段不存在；没开的聚合不允许；没授权的角色看不见。
+# =============================================================================
+
+version: 1
+model:
+  name: hr_domain
+  dialect: sqlite          # DuckDB/SQLite 兼容子集
+  doc: dsl-v1.html         # 防单点：设计文档锚点
+
+# ---------------------------------------------------------------- 角色
+# securityContext 的合法取值。未列出的 role 一律 DENY（fail-closed 缺省）。
+roles:
+  employee:
+    scope: self
+    row_expr: "e.id = ${ctx.emp_id}"
+  dept_manager:
+    scope: dept_subtree
+    row_expr: "e.dept_id IN ${ctx.dept_subtree}"   # 启动时由 department.parent_id 闭包表物化
+  hr_admin:
+    scope: all
+    row_expr: null                                  # 无行级约束
+  auditor:
+    scope: none
+    row_expr: "1 = 0"                               # 显式空集，拒绝一切
+
+# ---------------------------------------------------------------- 实体
+entities:
+  employee:
+    table: employee
+    pk: id
+  department:
+    table: department
+    pk: id
+
+# ---------------------------------------------------------------- 数据集
+datasets:
+
+  employee:
+    table: employee
+    inherits: [employee_dims]    # W5：继承本维度块只为获得 dept_name 虚拟列（W5 eval C5 实证缺口：
+                                 # 员工表自己反而查不了部门名）。own 优先，重名字段无害。
+    fields:
+      id:
+        display_name: 员工ID
+        expr: id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+      name:
+        display_name: 姓名
+        expr: name
+        type: string
+        kind: attribute          # 只可展示，禁 group_by / 聚合
+        aggregable: false
+        sensitivity: internal
+        synonyms: [员工, 人员]
+        description: 员工姓名，仅作展示列
+      dept_id:
+        display_name: 部门ID
+        expr: dept_id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+      level:
+        display_name: 职级
+        expr: level
+        type: string
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+        synonyms: [级别, 职等]
+      salary:
+        display_name: 月薪
+        expr: salary
+        type: int
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, min, max, count]   # 不开放 sum：总薪资无业务口径，防大数泄漏
+        sensitivity: critical
+        mask: "null"
+        synonyms: [工资, 薪资, 收入]
+        description: 当前月薪（时点值）。历史薪酬请查 payroll 数据集
+      hire_date:
+        display_name: 入职日期
+        expr: hire_date
+        type: date
+        grain: day
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count, min, max]
+        sensitivity: internal
+        synonyms: [入职时间, 入职]
+
+  department:
+    table: department
+    inherits: []
+    fields:
+      id:
+        display_name: 部门ID
+        expr: id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: public
+      name:
+        display_name: 部门名称
+        expr: name
+        type: string
+        kind: attribute
+        aggregable: false
+        sensitivity: public
+        synonyms: [部门, 组]
+      parent_id:
+        display_name: 上级部门ID
+        expr: parent_id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: public
+        description: 自引用层级；dept_manager 行级范围依赖其闭包
+
+  attendance:
+    table: attendance
+    inherits: [employee_dims]    # 自动携带 employee 的维度字段（经 e 别名 join）
+    pk_composite: [emp_id, work_date]
+    fields:
+      emp_id:
+        display_name: 员工ID
+        expr: emp_id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+      work_date:
+        display_name: 考勤日期
+        expr: work_date
+        type: date
+        grain: day
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count, min, max]
+        sensitivity: internal
+        synonyms: [日期, 考勤时间]
+      hours:
+        display_name: 工时
+        expr: hours
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [sum, avg, min, max]
+        sensitivity: internal
+        synonyms: [工作时长, 工时数]
+      late_min:
+        display_name: 迟到分钟数
+        expr: late_min
+        type: int
+        kind: measure
+        aggregable: true
+        allowed_aggs: [sum, avg, max, count]   # count 语义正确的前提：必须配 late_min>0 过滤（W5 eval case 盯防）
+        sensitivity: internal
+        synonyms: [迟到]
+        description: 零值陷阱字段。迟到次数 = count(late_min) 且 filter late_min>0；无过滤的 count 会数成出勤天数
+      early_leave:
+        display_name: 早退分钟数
+        expr: early_leave
+        type: int
+        kind: measure
+        aggregable: true
+        allowed_aggs: [sum, avg, max, count]   # 同 late_min：count 需配 >0 过滤
+        sensitivity: internal
+        synonyms: [早退]
+
+  leave_balance:
+    table: leave_balance
+    inherits: [employee_dims]
+    pk_composite: [emp_id, leave_type]
+    fields:
+      emp_id:
+        display_name: 员工ID
+        expr: emp_id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+      leave_type:
+        display_name: 假别
+        expr: leave_type
+        type: string
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+        synonyms: [假期类型, 休假类型]
+      quota:
+        display_name: 假期额度
+        expr: quota
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [sum, avg]
+        sensitivity: internal
+        synonyms: [总额度, 额度]
+      used:
+        display_name: 已用假期
+        expr: used
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [sum, avg]
+        sensitivity: internal
+        synonyms: [已休]
+        description: 剩余假期 = quota - used（LLM 提示词映射规则，OQ3）
+
+  payroll:
+    table: payroll               # 物理表待建（OQ1）
+    inherits: [employee_dims]
+    pk_composite: [emp_id, pay_month]
+    fields:
+      emp_id:
+        display_name: 员工ID
+        expr: emp_id
+        type: int
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count]
+        sensitivity: internal
+      pay_month:
+        display_name: 发放月份
+        expr: pay_month
+        type: month
+        grain: month
+        kind: dimension
+        aggregable: true
+        allowed_aggs: [count, min, max]
+        sensitivity: internal
+        synonyms: [工资月份, 发薪月]
+      base_salary:
+        display_name: 基本工资
+        expr: base_salary
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, min, max, count]   # critical 全族不开放 sum
+        sensitivity: critical
+        mask: "null"
+        synonyms: [底薪, 基本薪资]
+      bonus:
+        display_name: 奖金
+        expr: bonus
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, max, count]
+        sensitivity: critical
+        mask: "null"
+      overtime_pay:
+        display_name: 加班费
+        expr: overtime_pay
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, max, count]
+        sensitivity: critical
+        mask: "null"
+        synonyms: [加班工资]
+      insurance_housing:
+        display_name: 五险一金个人部分
+        expr: insurance_housing
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, count]
+        sensitivity: critical
+        mask: "null"
+        synonyms: [社保公积金]
+      tax:
+        display_name: 个人所得税
+        expr: tax
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, count]
+        sensitivity: critical
+        mask: "null"
+        synonyms: [个税]
+      net_pay:
+        display_name: 实发工资
+        expr: net_pay
+        type: decimal
+        kind: measure
+        aggregable: true
+        allowed_aggs: [avg, min, max, count]
+        sensitivity: critical
+        mask: "null"
+        synonyms: [到手, 实发, 税后]
+
+# ---------------------------------------------------------------- 虚拟列
+virtual_columns:
+  dept_name:
+    display_name: 部门
+    via: employee                # employee → department 两跳展开
+    expr: department.name
+    type: string
+    kind: dimension
+    synonyms: [部门, 所属部门, 团队]
+
+# ---------------------------------------------------------------- 维度继承块
+inherit_blocks:
+  employee_dims:                 # 只带 dimension，不带 measure
+    from: employee
+    fields: [id, name, dept_id, level, hire_date, dept_name]
+
+# ---------------------------------------------------------------- 时间语义
+time_semantics:
+  interval: closed_open          # [start, end)；「8 月」→ [2026-08-01, 2026-09-01)
+  date_formats: ["YYYY", "YYYY-MM", "YYYY-MM-DD"]
+  month_formats: ["YYYY-MM"]
+  relative_time: llm_resolved    # 「上个月」由 LLM 解析为绝对区间；校验器只认绝对值
+  timezone: none                 # 业务日期字符串直接比较，单时区，防过度设计
+
+# ---------------------------------------------------------------- 权限矩阵
+# 缺省 DENY：矩阵外格子一律拒绝。详见 dsl-v1.html 第 5 节。
+permission_matrix:
+  sensitivities: [public, internal, sensitive, critical]
+  defaults:
+    public:   { employee: allow, dept_manager: allow, hr_admin: allow, auditor: allow }
+    internal: { employee: allow, dept_manager: allow, hr_admin: allow, auditor: deny }
+    sensitive: { employee: allow_self_row, dept_manager: mask, hr_admin: allow, auditor: deny }
+    critical:  { employee: allow_self_row, dept_manager: mask, hr_admin: allow, auditor: deny }
+  hard_rules:
+    - "critical 字段不开放 sum 聚合（allowed_aggs 已收口）"
+    - "critical 字段出现在 order_by 且角色非 hr_admin → 整查询 DENY"
+    - "critical 字段出现在 filter 且角色非 hr_admin → 整查询 DENY"

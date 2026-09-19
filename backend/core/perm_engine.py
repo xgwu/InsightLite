@@ -1,0 +1,148 @@
+# -*- coding: utf-8 -*-
+"""
+ChatBI-Lite W4 · 权限策略引擎 v1（dev-plan.html C5）
+三态决策：ALLOW（明文）/ MASK（列 null 化）/ DENY（整查询拒绝）。缺省 DENY——矩阵外的格子一律拒绝。
+
+输入：合法 SMQ（调用方必须先过 smq_schema.validate）+ securityContext（role 必填）。
+策略来源：semantic_model/hr_domain_v1.yaml 的 roles / permission_matrix / 字段 sensitivity（dsl-v1.html 第 5 节）。
+
+v1 硬规则（dsl-v1.html 6.5，W7 权限矩阵验收直接引用）：
+  R1 critical 字段不开放 sum —— 已由 smq_schema allowed_aggs 收口（这里不重复）
+  R2 critical 字段出现在 order_by 且角色非 hr_admin -> DENY
+  R3 critical 字段出现在 filter   且角色非 hr_admin -> DENY
+列级 MASK：sensitive/critical 字段对 dept_manager 角色以 NULL 输出（Cube Spike T2 语义，升级为生成器保证）。
+employee 角色：行级策略已限定本人行，本人数据明文（OQ2 决策）；不额外 MASK。
+"""
+import sqlite3
+
+import dsl_loader
+
+_SENS = dsl_loader.SENSITIVITY_LEVELS
+_HIDDEN = ("sensitive", "critical")     # 需 MASK 的敏感级
+_ADMIN = "hr_admin"
+
+
+class PermError(Exception):
+    """权限引擎内部输入不合法（如 SMQ 未过校验）。显式失败。"""
+
+
+def _sens_of(ds, field):
+    fm = dsl_loader.REG.own[ds].get(field) or dsl_loader.REG.inherited[ds].get(field) or {}
+    return fm.get("sensitivity", "internal")
+
+
+def _fields_in(smq, section):
+    out = []
+    for item in smq.get(section) or []:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            out.append(item.get("field"))
+    return out
+
+
+def dept_subtree(conn: sqlite3.Connection, dept_id: int):
+    """department.parent_id 闭包（启动物化思想的运行时等价物，仅测试/演示用）。"""
+    ids, frontier = [], [dept_id]
+    while frontier:
+        placeholders = ",".join("?" * len(frontier))
+        rows = conn.execute(
+            f"SELECT id FROM department WHERE parent_id IN ({placeholders})", frontier
+        ).fetchall()
+        frontier = [r[0] for r in rows if r[0] not in ids]
+        ids.extend(frontier)
+    return sorted(set(ids) | {dept_id})
+
+
+def row_policy(conn: sqlite3.Connection, ds: str, ctx: dict):
+    """行级策略 -> SQL 条件文本（含参数值）或 None（无约束）。
+    ctx.role 非法时抛 PermError（fail-closed 由 decide 统一处理为 DENY）。"""
+    role = ctx.get("role")
+    if role not in dsl_loader.REG.roles:
+        raise PermError(f"unknown role: {role!r}")
+    if role == "employee":
+        emp = ctx.get("emp_id")
+        if emp is None:
+            raise PermError("employee role requires ctx.emp_id")
+        return ("e.id = ?", [emp])
+    if role == "dept_manager":
+        dept = ctx.get("dept_id")
+        if dept is None:
+            raise PermError("dept_manager role requires ctx.dept_id")
+        ids = dept_subtree(conn, dept)
+        return (f"e.dept_id IN ({','.join('?' * len(ids))})", ids)
+    if role == "hr_admin":
+        return None
+    return ("1 = 0", [])          # auditor / scope none：显式空集
+
+
+def mask_fields(ds: str, role: str, fields):
+    """需要 MASK（NULL 化）的输出字段列表。"""
+    if role == _ADMIN:
+        return []
+    return [f for f in fields if _sens_of(ds, f) in _HIDDEN and role != "employee"]
+
+
+def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
+    """三态决策主入口。smq 必须已通过 smq_schema.validate（内部不重复校验，缺 dataset 即 DENY）。
+    conn 可选：R4 需要把 filter 里的姓名与本人姓名比对；不传则按需自开连接。"""
+    version = dsl_loader.REG.version
+    role = ctx.get("role")
+    if role not in dsl_loader.REG.roles:                       # 未登录 / 伪造角色：主验证面
+        return {"decision": "DENY", "reason": f"unknown role: {role!r}", "model_version": version}
+    if dsl_loader.REG.roles[role].get("scope") == "none":      # 显式无范围：全 DENY（fail-closed 缺省）
+        return {"decision": "DENY", "reason": f"role {role!r} has scope=none", "model_version": version}
+    ds = smq.get("dataset")
+    if ds not in dsl_loader.REG.tables:
+        return {"decision": "DENY", "reason": f"unknown dataset: {ds!r}", "model_version": version}
+
+    order_fields = _fields_in(smq, "order_by")
+    filter_fields = [f.get("field") for f in smq.get("filter") or []]
+    out_fields = _fields_in(smq, "columns") + [g for g in smq.get("group_by") or []]
+
+    # R2/R3：critical 的排序/过滤对非 hr_admin 整查询拒绝
+    if role != _ADMIN:
+        for f in order_fields:
+            if _sens_of(ds, f) == "critical":
+                return {"decision": "DENY", "reason": f"R2: critical field {f!r} in order_by",
+                        "model_version": version}
+        for f in filter_fields:
+            if _sens_of(ds, f) == "critical":
+                return {"decision": "DENY", "reason": f"R3: critical field {f!r} in filter",
+                        "model_version": version}
+
+    # R4（W4 落地，OQ2 配套）：employee 角色指名道姓查「他人」-> DENY。
+    # 行级策略虽会静默过滤成空集，但「查李娜的工资得到空」是信息泄漏面（存在性推断），
+    # 且掩盖 LLM 误解析——显式拒绝才是矩阵承诺的语义（dev-plan 第 6 节「他人薪资 = DENY」）。
+    if role == "employee":
+        name_filters = [f for f in smq.get("filter") or []
+                        if f.get("field") == "name" and f.get("op") == "eq"]
+        if name_filters:
+            own_conn = conn or sqlite3.connect(
+                __import__("os").path.join(
+                    __import__("os").path.dirname(__import__("os").path.dirname(
+                        __import__("os").path.abspath(__file__))), "data", "hr_demo.db"))
+            try:
+                row = own_conn.execute("SELECT name FROM employee WHERE id = ?",
+                                       (ctx.get("emp_id"),)).fetchone()
+            finally:
+                if conn is None:
+                    own_conn.close()
+            own_name = row[0] if row else None
+            for f in name_filters:
+                if own_name is None or f["value"] != own_name:
+                    return {"decision": "DENY",
+                            "reason": "R4: 指名道姓查询他人数据（本人请用「我的」表述）",
+                            "model_version": version}
+
+    masked = mask_fields(ds, role, out_fields)
+    if masked:
+        return {"decision": "MASK", "reason": f"masked columns: {masked}", "model_version": version}
+    return {"decision": "ALLOW", "reason": "no restricted access", "model_version": version}
+
+
+if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    print(f"perm_engine smoke: model={dsl_loader.REG.version}")
+    print("run test_dsl_v1.py for the full matrix.")

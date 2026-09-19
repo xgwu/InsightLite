@@ -1,0 +1,18 @@
+# 密钥与本地配置不入库
+.env
+
+# 种子数据与生成产物可重建（deploy/seed/make_hr_data.py 随时可再生成）
+data/
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node（W7 前端脚手架后生效）
+node_modules/
+dist/
+
+# LLM 实跑落盘证据（评测证据文件按需手动保留）
+backend/core/_llm10_result.json
