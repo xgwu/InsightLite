@@ -175,9 +175,13 @@ def ask(question: str, api_key: str, ctx: dict, conn: sqlite3.Connection = None)
     own_conn = conn is None
     c = conn or sqlite3.connect(DB)
     try:
-        import llm_intent as L
-        raw = L.call_deepseek(question, api_key)                       # 环节1: LLM 意图
-        kind, payload = _interpret(raw)                                # 环节1b: 契约分派
+        try:
+            import orchestrator as O
+            kind, payload = O.interpret(question, api_key)             # 环节1: D3 PydanticAI 意图
+        except ImportError:                                            # 框架未安装 -> 旧路径降级
+            import llm_intent as L
+            raw = L.call_deepseek(question, api_key)                   # 环节1: LLM 意图
+            kind, payload = _interpret(raw)                            # 环节1b: 契约分派
         if kind == "refused_scope":
             return {"status": "refused_scope",
                     "text": f"该问题超出了当前数据范围，无法回答：{payload}"}
@@ -189,6 +193,8 @@ def ask(question: str, api_key: str, ctx: dict, conn: sqlite3.Connection = None)
             return {"status": "error", "text": f"查询失败（意图解析异常）：{payload}"}
         smq = payload
         verdict = P.decide(smq, ctx, conn=c)                            # 环节2: 权限三态（授权先于检索）
+        import audit as A
+        A.record_if_exempt(verdict, ctx, smq, source="render-ask")      # D4: 豁免逐次审计
         if verdict["decision"] == "DENY":
             return {"status": "denied",
                     "text": f"没有权限执行该查询（{verdict['reason']}）。"}

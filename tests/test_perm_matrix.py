@@ -227,6 +227,43 @@ def seg_a_decision():
     check(seg, "A7 auditor employee 查询引用 internal 过滤字段 -> DENY",
           v["decision"] == "DENY", f"got {v['decision']}")
 
+    # A8: D4（2026-09-19 裁决）—— hr_admin 默认豁免 + 逐次审计标记
+    v = P.decide({"dataset": "payroll", "columns": ["net_pay"]}, CTX["hr_admin"])
+    check(seg, "A8 D4 hr_admin 豁免 -> ALLOW + exempt 标记",
+          v["decision"] == "ALLOW" and v.get("exempt") is True, f"got {v}")
+    check(seg, "A8 D4 豁免 verdict 携带空策略产物（消费者统一形态）",
+          v.get("policy") == {"row_cond": None, "masked": []}, str(v.get("policy")))
+    v = P.decide({"dataset": "no_such_ds", "columns": ["x"]}, CTX["hr_admin"])
+    check(seg, "A8 D4 豁免不越过未知数据集 fail-closed",
+          v["decision"] == "DENY" and "exempt" not in v, f"got {v}")
+    for role in ("employee", "dept_manager", "auditor"):
+        v = P.decide({"dataset": "payroll", "columns": ["pay_month"]}, CTX[role])
+        check(seg, f"A8 D4 非 admin verdict 无豁免标记（{role}）", "exempt" not in v,
+              f"got {v.get('exempt')}")
+    # 审计落盘：豁免 verdict 必写、非豁免必不写（append-only JSONL）
+    import audit as A
+    import tempfile
+    fd, tmp_path = tempfile.mkstemp(suffix=".jsonl")
+    os.close(fd)
+    try:
+        smq_hr = {"dataset": "payroll", "columns": ["net_pay"]}
+        written = A.record_if_exempt(v if False else P.decide(smq_hr, CTX["hr_admin"]),
+                                     CTX["hr_admin"], smq_hr, source="matrix-test", path=tmp_path)
+        check(seg, "A8 D4 豁免查询 -> 审计记录写入", written is True and os.path.getsize(tmp_path) > 0)
+        import json as _json
+        entry = _json.loads(open(tmp_path, encoding="utf-8").read().splitlines()[-1])
+        check(seg, "A8 D4 审计条目含 主体/角色/SMQ/决策/版本 五要素",
+              entry["actor"]["role"] == "hr_admin" and entry["smq"] == smq_hr
+              and entry["decision"] == "ALLOW" and entry["model_version"]
+              and entry["source"] == "matrix-test", str(entry)[:120])
+        v_non = P.decide({"dataset": "payroll", "columns": ["pay_month"]}, CTX["auditor"])
+        check(seg, "A8 D4 非豁免 verdict 不写审计",
+              A.record_if_exempt(v_non, CTX["auditor"], {"dataset": "payroll"},
+                                 source="matrix-test", path=tmp_path) is False
+              and len(open(tmp_path, encoding="utf-8").read().splitlines()) == 1)
+    finally:
+        os.unlink(tmp_path)
+
 
 # ================================================================ B fail-closed 段
 def seg_b_failclosed():

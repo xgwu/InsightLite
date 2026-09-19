@@ -14,6 +14,9 @@ v1 硬规则（dsl-v1.html 6.5 + 2026-09-19 裁决，W7 权限矩阵验收直接
      group_by 取值本身即输出，独立于「决策==遮蔽」判定）
 scope=none 角色（auditor）：可访问纯 public 引用查询（裁决：matrix.public.auditor=allow 生效），
   任何非 public 字段引用整查询 DENY；个人行数据集 row_cond 显式空集。
+D4 裁决（2026-09-19）：hr_admin 默认豁免——通过角色/数据集 fail-closed 校验后短路 ALLOW，
+  verdict.exempt 标记 + 调用方逐次审计（audit.record_if_exempt）；豁免是唯一管理员语义，
+  未来新增约束默认对 hr_admin 无效，除非显式写在豁免之前。
 列级 MASK：sensitive/critical 字段对 dept_manager 角色以 NULL 输出（Cube Spike T2 语义，升级为生成器保证）。
 employee 角色：行级策略已限定本人行，本人数据明文（OQ2 决策）；不额外 MASK。
 """
@@ -104,7 +107,10 @@ def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
     """三态决策主入口。smq 必须已通过 smq_schema.validate（内部不重复校验，缺 dataset 即 DENY）。
     conn 可选：R4 需要把 filter 里的姓名与本人姓名比对；不传则按需自开连接。
     2026-09-19 裁决落地：① scope=none 角色（auditor）可访问纯 public 引用查询；
-    ② 新增 R5 硬规则（critical/sensitive 进 group_by 且非 hr_admin -> 整查询 DENY）。"""
+    ② 新增 R5 硬规则（critical/sensitive 进 group_by 且非 hr_admin -> 整查询 DENY）；
+    ③ D4 裁决：hr_admin 默认豁免——通过角色/数据集 fail-closed 校验后短路 ALLOW，
+    verdict 带 exempt 标记，调用方必须逐次写审计（audit.record_if_exempt）。
+    豁免不越过：未知角色/未知数据集仍 DENY；字段级合法性由编译层 S.validate 把守。"""
     version = dsl_loader.REG.version
     role = ctx.get("role")
     if role not in dsl_loader.REG.roles:                       # 未登录 / 伪造角色：主验证面
@@ -112,6 +118,16 @@ def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
     ds = smq.get("dataset")
     if ds not in dsl_loader.REG.tables:
         return {"decision": "DENY", "reason": f"unknown dataset: {ds!r}", "model_version": version}
+
+    # D4（2026-09-19 裁决）：管理员默认豁免 + 逐次审计标记。
+    # 语义：hr_admin 不再逐条走矩阵/硬规则（R2/R3/R5 本就豁免，D4 把豁免显式化为唯一语义，
+    # 未来新增约束默认对 hr_admin 无效，除非显式写在豁免之前）；每次豁免查询由调用方强制审计。
+    if role == _ADMIN:
+        return {"decision": "ALLOW",
+                "reason": "D4: hr_admin default exemption (audited)",
+                "exempt": True,
+                "policy": {"row_cond": None, "masked": []},
+                "model_version": version}
 
     order_fields = _fields_in(smq, "order_by")
     filter_fields = [f.get("field") for f in smq.get("filter") or []]

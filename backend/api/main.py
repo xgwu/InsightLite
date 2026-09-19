@@ -77,6 +77,8 @@ def query(req: QueryRequest, ctx: dict = Depends(build_ctx)):
     conn = sqlite3.connect(DB_PATH)
     try:
         verdict = P.decide(req.smq, ctx, conn=conn)          # 授权先于检索
+        import audit as A
+        A.record_if_exempt(verdict, ctx, req.smq, source="api-query")   # D4: 豁免逐次审计
         if verdict["decision"] == "DENY":
             return QueryResponse(status="denied", decision="DENY",
                                  reason=verdict.get("reason", ""))
