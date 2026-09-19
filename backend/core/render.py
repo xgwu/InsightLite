@@ -27,6 +27,10 @@ DB = os.path.join(BASE, "data", "hr_demo.db")
 
 AGG_CN = {"sum": "总和", "avg": "平均", "count": "次数", "min": "最小", "max": "最大"}
 
+# count 聚合的量词（W9 修正：「全公司多少人」渲染为总量语句而非单格表格）
+DATASET_UNIT = {"employee": "名员工", "attendance": "条考勤记录", "payroll": "条工资记录",
+                "leave_balance": "条假期记录", "department": "个部门"}
+
 
 def _display_name(ds, field):
     fm = dsl_loader.REG.own[ds].get(field) or dsl_loader.REG.inherited[ds].get(field) or {}
@@ -64,6 +68,19 @@ def render_result(smq, rows, total, shown, verdict=None):
         if smq.get("filter"):
             lines.append("\n> 💡 可以换个时间段或条件再试试；若涉及「本月/上个月」等说法，也可以直接指定月份。")
     else:
+        if (not smq.get("group_by") and len(headers) == 1 and total == 1
+                and isinstance(smq["columns"][0], dict)):
+            # W9 修正：无分组的单行单聚合渲染为一句话（count -> 总量语句；其余 -> 指标句），
+            # 不再套「共 1 条记录」表格——数字本身即答案。
+            spec = smq["columns"][0]
+            v = rows[0][0]
+            if spec.get("agg") == "count":
+                lines.append(f"共 **{fmt_num(v)}** {DATASET_UNIT.get(ds, '条记录')}。")
+            else:
+                lines.append(f"{headers[0]}：**{fmt_num(v)}**")
+            if verdict and verdict.get("decision") == "MASK":
+                lines.append(f"\n> 🔒 敏感列已按权限脱敏（{verdict.get('reason', '')}）。")
+            return "\n".join(lines)
         if len(headers) == 2 and smq.get("group_by") and isinstance(smq["columns"][-1], dict):
             # 单维度 + 单聚合：一句话 + 表格（TopN 场景最常见）
             agg_spec = smq["columns"][-1]
@@ -196,7 +213,8 @@ def ask(question: str, api_key: str, ctx: dict, conn: sqlite3.Connection = None)
         import audit as A
         A.record_if_exempt(verdict, ctx, smq, source="render-ask")      # D4: 豁免逐次审计
         if verdict["decision"] == "DENY":
-            return {"status": "denied",
+            # W9: denied 回显 SMQ——排障可核对 LLM 原始意图与命中的硬规则（不回显即黑箱）
+            return {"status": "denied", "smq": smq,
                     "text": f"没有权限执行该查询（{verdict['reason']}）。"}
         if smq.get("compare_to"):                                       # 环节3-5: 环比双查询路径
             return _answer_compare(smq, c, verdict)

@@ -62,3 +62,14 @@ body {
   background: #f6f8fa; border: 1px solid #e5e5e5; border-radius: 6px;
   padding: 10px; font-size: 12px; overflow-x: auto; margin: 6px 0;
 }
+
+/* ---------------- W9 看板 ---------------- */
+.dashboard-wrap { display: flex; flex-direction: column; }
+.dashboard-body { flex: 1; overflow: auto; padding: 16px; }
+.dash-center { display: flex; justify-content: center; align-items: center; height: 60vh; }
+.dash-widget { background: #fff; border-radius: 8px; }
+.dash-title a { color: inherit; font-weight: 600; }
+.dash-title a:hover { color: #1677ff; }
+.react-grid-item.react-grid-placeholder { background: #1677ff; opacity: .15; border-radius: 8px; }
+.react-grid-item { transition: box-shadow .2s; }
+.react-grid-item:hover { box-shadow: 0 2px 12px rgba(0, 0, 0, .08); }

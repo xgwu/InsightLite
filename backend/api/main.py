@@ -43,7 +43,7 @@ from schemas import AskRequest, DevLoginRequest, QueryRequest, QueryResponse  # 
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(CORE)), "data", "hr_demo.db")
 
-app = FastAPI(title="InsightLite API", version="0.2.0-w8",
+app = FastAPI(title="InsightLite API", version="0.3.0-w9",
               description="轻量级 ChatBI：语义 YAML + SMQ 确定性编译 + 三态权限策略引擎")
 
 
@@ -82,7 +82,7 @@ def _execute(smq: dict, ctx: dict, conn: sqlite3.Connection, source: str) -> dic
     A.record_if_exempt(verdict, ctx, smq, source=source)          # D4: 豁免逐次审计
     if verdict["decision"] == "DENY":
         return {"status": "denied", "decision": "DENY",
-                "reason": verdict.get("reason", "")}
+                "reason": verdict.get("reason", ""), "smq": smq}   # W9: denied 回显 SMQ
     if smq.get("compare_to"):
         return R._answer_compare(smq, conn, verdict)              # 环比双查询路径
     sql, _ast = C.compile_smq(smq, policy=verdict.get("policy"))  # 消费策略产物
@@ -209,3 +209,9 @@ def dev_login(req: DevLoginRequest):
         raise HTTPException(status_code=403, detail=f"unknown sso role: {req.role!r}")
     emp, dept, path = DEV_IDENTITY[req.role]
     return {"token": sso_mock.issue(emp, req.role, dept, path), "role": req.role}
+
+
+# W9 看板路由（置于 _execute 定义之后挂载：dashboard 复用唯一执行核心，避免循环导入）
+from dashboard import router as dashboard_router  # noqa: E402
+
+app.include_router(dashboard_router)

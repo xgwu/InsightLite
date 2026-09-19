@@ -1,5 +1,5 @@
 // InsightLite API 客户端：token 管理 + SSE（POST fetch 流式解析）
-import type { QueryResult, Stage, StreamEvent } from "./types";
+import type { QueryResult, Stage, StreamEvent, WidgetDef } from "./types";
 
 const API = "/api";
 const TOKEN_KEY = "insightlite.token";
@@ -109,4 +109,46 @@ export async function postQuery(smq: Record<string, unknown>): Promise<QueryResu
     throw new Error(`非法 SMQ：${b.detail}`);
   }
   return r.json();
+}
+
+// ---------------- W9 看板 ----------------
+
+export async function fetchDashboard(): Promise<{ widgets: WidgetDef[]; model_version: string }> {
+  const r = await fetch(`${API}/dashboard`, { headers: authHeaders() });
+  if (r.status === 401 || r.status === 403) throw new Error("会话失效，请重新登录");
+  if (!r.ok) throw new Error(`看板加载失败（${r.status}）`);
+  return r.json();
+}
+
+export async function addWidget(
+  title: string, smq: Record<string, unknown>, chart: WidgetDef["chart"],
+): Promise<WidgetDef> {
+  const r = await fetch(`${API}/dashboard`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ title, smq, chart }),
+  });
+  if (r.status === 401 || r.status === 403) throw new Error("会话失效，请重新登录");
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({}));
+    throw new Error(`加入看板失败：${b.detail ?? r.status}`);
+  }
+  return (await r.json()).widget;
+}
+
+export async function deleteWidget(id: string): Promise<void> {
+  const r = await fetch(`${API}/dashboard/${id}`, { method: "DELETE", headers: authHeaders() });
+  if (r.status === 403) throw new Error("无权删除该看板项");
+  if (!r.ok) throw new Error(`删除失败（${r.status}）`);
+}
+
+export async function saveLayout(
+  layouts: { id: string; x: number; y: number; w: number; h: number }[],
+): Promise<void> {
+  const r = await fetch(`${API}/dashboard/layout`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ layouts }),
+  });
+  if (!r.ok) throw new Error(`布局保存失败（${r.status}）`);
 }

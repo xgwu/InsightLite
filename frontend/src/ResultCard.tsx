@@ -1,37 +1,16 @@
-// 结果卡片：中文表格 + 单维聚合自动图表（ECharts）+ SQL/SMQ 折叠
-import { useEffect, useRef } from "react";
+// 结果卡片：中文表格 + 单维聚合自动图表（ECharts）+ SQL/SMQ 折叠 + 一键固化入板
+import { Modal } from "antd";
+import { PushpinOutlined } from "@ant-design/icons";
 import { Collapse, Tag, Typography } from "antd";
-import * as echarts from "echarts";
-import type { QueryResult } from "./types";
+import type { ChartType, QueryResult } from "./types";
+import { Chart } from "./Chart";
 import { Markdown } from "./Markdown";
 
-function Chart({ data }: { data: NonNullable<QueryResult["data"]> }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!ref.current) return;
-    const chart = echarts.init(ref.current);
-    const [dimCol] = data.columns;
-    const numIdx = data.columns.findIndex((_, i) => i > 0 && typeof data.rows[0]?.[i] === "number");
-    chart.setOption({
-      grid: { left: 48, right: 16, top: 32, bottom: 64 },
-      tooltip: { trigger: "axis" },
-      xAxis: { type: "category", data: data.rows.map((r) => String(r[0] ?? "—")), axisLabel: { rotate: 30 } },
-      yAxis: { type: "value" },
-      series: [{
-        type: "bar",
-        name: numIdx > 0 ? data.columns[numIdx] : dimCol,
-        data: data.rows.map((r) => (numIdx > 0 ? r[numIdx] : r[1])),
-        itemStyle: { color: "#1677ff" },
-      }],
-    });
-    const onResize = () => chart.resize();
-    window.addEventListener("resize", onResize);
-    return () => { window.removeEventListener("resize", onResize); chart.dispose(); };
-  }, [data]);
-  return <div ref={ref} style={{ width: "100%", height: 320, marginTop: 12 }} />;
-}
-
-export function ResultCard({ result }: { result: QueryResult }) {
+export function ResultCard({ result, question, onAddToDashboard }: {
+  result: QueryResult;
+  question?: string;
+  onAddToDashboard?: (title: string, smq: Record<string, unknown>, chart: ChartType) => void;
+}) {
   const { data } = result;
   // 图表条件：二维单数值（分组 + 单聚合）且行数 1..50
   const chartable = !!data && data.columns.length === 2 && data.rows.length > 0
@@ -42,6 +21,19 @@ export function ResultCard({ result }: { result: QueryResult }) {
       {result.decision}
     </Tag>
   );
+
+  // FR-24/27：一键固化带完整口径；入板前强制「数值人工比对一次」的补偿提示
+  const pin = () => {
+    const chart: ChartType = chartable ? "bar" : "table";
+    const title = (question || "未命名查询").slice(0, 40);
+    Modal.confirm({
+      title: "加入看板前，请先完成一次数值比对",
+      content: `FR-27 补偿动作：自动化数值验证缺位期间，加入看板的数字必须与对话结果人工核对一次（当前共 ${result.total ?? data?.rows.length ?? 0} 组）。确认无误后入板。`,
+      okText: "已核对，加入看板",
+      cancelText: "取消",
+      onOk: () => onAddToDashboard?.(title, result.smq!, chart),
+    });
+  };
 
   const items = [];
   if (result.sql) {
@@ -77,6 +69,11 @@ export function ResultCard({ result }: { result: QueryResult }) {
       <div className="result-meta">
         {decisionTag}
         {result.total != null && <Typography.Text type="secondary">{result.total.toLocaleString()} 组</Typography.Text>}
+        {onAddToDashboard && result.status === "answered" && result.smq && (
+          <a onClick={pin} style={{ marginLeft: "auto", fontSize: 12 }}>
+            <PushpinOutlined /> 加入看板
+          </a>
+        )}
       </div>
       <Markdown text={result.text ?? ""} />
       {chartable && <Chart data={data!} />}

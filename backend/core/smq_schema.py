@@ -4,7 +4,9 @@ ChatBI-Lite · SMQ（Semantic Model Query）schema —— W4 起注册表由 DSL
 接口与 SMQ v0 完全兼容（compiler / llm_intent / e2e_live 回归基准不变），
 新增 v1 校验（dsl-v1.html 第 9 节 C2/C4）：
   - C2: 聚合受 allowed_aggs 白名单约束（sum(salary)、avg(name) 显式拒绝）
-  - C4: attribute 字段 group_by 合法但编译期锚定实体主键；measure 禁止 group_by
+  - C4: attribute 字段 group_by 合法但编译期锚定实体主键；measure 进 group_by 时：
+        非敏感度量归一化剔除（LLM 误放的确定性纠偏）；critical/sensitive 度量原样保留、
+        交由权限层 R5 裁决（W9 安全修订——group_by 是权限向量，归一化不得吞掉它）
   - 虚拟列（dept_name）仅在含 department join 的数据集可用（v0 隐患显式化）
 
 SMQ 是 LLM 意图解析的输出契约：LLM 只产 SMQ JSON，永不产 SQL（tech.html 架构纪律）。
@@ -112,8 +114,14 @@ def validate(smq: dict) -> dict:
         _field_ok(ds, g)
         fm = _field_meta(ds, g)
         if fm.get("kind") == "measure":
-            # LLM 常把度量误放进 group_by（意图=明细或按维度聚合）——确定性归一化：
-            # 剔除度量、保留维度。与 v0「agg 键省略归一化」同款先例；安全无关（group_by 非权限向量）。
+            # LLM 常把度量误放进 group_by（意图=明细或按维度聚合）——确定性归一化：剔除度量、保留维度。
+            # 【W9 安全修订】归一化只适用于非敏感度量：R5 裁决（2026-09-19）后 group_by 是
+            # 权限向量（取值本身即输出，纪律 13），critical/sensitive 度量必须原样保留、
+            # 交由权限层裁决（非 hr_admin -> R5 DENY；hr_admin 经 D4 豁免后按度量分组合法，
+            # 编译期 group_exprs 对度量返回裸列）。修复前：归一化先于 decide() 静默剥掉
+            # salary -> R5 不可达（fail-open），矩阵 A6 直调 decide 未覆盖此管线缝隙。
+            if fm.get("sensitivity") in ("critical", "sensitive"):
+                new_gb.append(g)
             continue
         # attribute 允许 group_by：编译期经 group_exprs 锚定实体主键（C4）
         new_gb.append(g)
