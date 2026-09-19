@@ -34,6 +34,7 @@ import audit as A  # noqa: E402
 import compiler as C  # noqa: E402
 import dsl_loader  # noqa: E402
 import perm_engine as P  # noqa: E402
+import qlog as Q  # noqa: E402
 import render as R  # noqa: E402
 import sso_mock  # noqa: E402
 import smq_schema as S  # noqa: E402
@@ -77,14 +78,20 @@ def datasets():
 def _execute(smq: dict, ctx: dict, conn: sqlite3.Connection, source: str) -> dict:
     """SMQ -> 权限 -> 编译 -> 执行 -> 渲染。/query 与 /ask/stream 共用。
     返回 QueryResponse 形状的 dict；权限 DENY 不抛错（返回 status=denied）。"""
+    import time as _t
+    t0 = _t.time()
     S.validate(smq)
     verdict = P.decide(smq, ctx, conn=conn)                       # 授权先于检索
     A.record_if_exempt(verdict, ctx, smq, source=source)          # D4: 豁免逐次审计
     if verdict["decision"] == "DENY":
+        Q.record(source, ctx, "denied", smq, dur_ms=int((_t.time() - t0) * 1000))  # W11: 观测面
         return {"status": "denied", "decision": "DENY",
                 "reason": verdict.get("reason", ""), "smq": smq}   # W9: denied 回显 SMQ
     if smq.get("compare_to"):
-        return R._answer_compare(smq, conn, verdict)              # 环比双查询路径
+        r = R._answer_compare(smq, conn, verdict)              # 环比双查询路径
+        Q.record(source, ctx, r.get("status", "answered"), smq,
+                 dur_ms=int((_t.time() - t0) * 1000))
+        return r
     sql, _ast = C.compile_smq(smq, policy=verdict.get("policy"))  # 消费策略产物
     lite = __import__("sqlglot").transpile(sql, read="postgres", write="sqlite")[0]
     rows = conn.execute(lite).fetchall()
@@ -94,6 +101,7 @@ def _execute(smq: dict, ctx: dict, conn: sqlite3.Connection, source: str) -> dic
     data = {"columns": [R._col_header(smq["dataset"], c) for c in smq["columns"]],
             "rows": [list(r) for r in rows[:100]]}
     text = R.render_result(smq, rows[:shown], total, shown, verdict)
+    Q.record(source, ctx, "answered", smq, dur_ms=int((_t.time() - t0) * 1000))
     return {"status": "answered", "decision": verdict["decision"],
             "reason": verdict.get("reason", ""), "text": text, "sql": sql,
             "smq": smq, "total": total, "data": data}
@@ -123,6 +131,7 @@ def ask(req: AskRequest, ctx: dict = Depends(build_ctx)):
                             detail="LLM_API_KEY not configured; /ask unavailable "
                                    "(use /query for deterministic SMQ path)")
     result = R.ask(req.question, LLM_API_KEY, ctx)           # ask 内部：授权先于检索
+    Q.record("api-ask", ctx, result.get("status", "error"), result.get("smq"))  # W11
     return QueryResponse(status=result.get("status", "error"),
                          reason=result.get("text", "")[:200] if result.get("status") == "denied" else "",
                          text=result.get("text", ""),
@@ -152,15 +161,18 @@ def sse_events(question: str, ctx: dict, api_key: str, intent_fn=None,
                 intent_fn = lambda q: R._interpret(L.call_deepseek(q, api_key))
         kind, payload = intent_fn(question)
         if kind == "refused_scope":
+            Q.record("sse-final", ctx, "refused_scope", None)          # W11: 未执行也计入分母
             yield fmt({"stage": "final", "status": "refused_scope",
                        "text": f"该问题超出了当前数据范围，无法回答：{payload}"})
             return
         if kind == "clarify":
+            Q.record("sse-final", ctx, "clarify", None)
             opts = "".join(f"\n- {o}" for o in payload["options"])
             yield fmt({"stage": "final", "status": "clarify",
                        "text": f"为了给您准确的答案，请先确认：{payload['question']}{opts}"})
             return
         if kind == "invalid":
+            Q.record("sse-final", ctx, "error", None)
             yield fmt({"stage": "final", "status": "error",
                        "text": f"查询失败（意图解析异常）：{payload}"})
             return
@@ -221,6 +233,11 @@ from connectors import router as connectors_router  # noqa: E402
 import connector as CC  # noqa: E402
 
 app.include_router(connectors_router)
+
+# W11 反馈闭环路由（纠正 -> eval case；三指标日报的分子来源）
+from feedback_api import router as feedback_router  # noqa: E402  # api 侧命名 feedback_api：避免与 core/feedback 撞名
+
+app.include_router(feedback_router)
 
 
 @app.get("/audit/recent")

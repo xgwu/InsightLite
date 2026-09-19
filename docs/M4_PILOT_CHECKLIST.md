@@ -25,11 +25,14 @@
 
 ## 三、W11–W12 日报机制（试点运行期）
 
-三项指标，每日由 eval harness 口径输出：
+三项指标，每日由 `python eval/daily_report.py` 产出（stdout + `data/reports/daily-YYYYMMDD.md`）：
 
-1. **口径一致率**（分母 = 语义覆盖集合）：目标 ≥80% 起步、向 90% 收敛
-2. **静默错误率**：stakeholder 纠正数 / 总问答数——每条纠正 48h 内转 eval case
-3. **明确失败率**：refused+denied+error 占比（明确失败是诚实，不是坏事；关注趋势）
+1. **口径一致率**（分母 = 语义覆盖集合，eval harness 离线回放，与 CI 同源）：目标 ≥80% 起步、向 90% 收敛
+2. **静默错误率**：accepted `wrong_number` 纠正数 / 窗口内总问答数（qlog；v1 生产口径，与 eval 集合口径不混算——日报内显式注记）；每条纠正 48h 内审核，accept 自动生成 eval case 骨架（`eval/pending_cases.json`），人工补断言转正进回归
+3. **明确失败率**：refused+denied+clarify+error / 总问答数（明确失败是诚实，不是坏事；关注趋势）
+
+日报另含「闭环健康」：超 48h 未处理的 open 反馈点名 + 待转正骨架数。
+配套端点：`POST /feedback`（全员）/ `GET /feedback`（hr_admin）/ `POST /feedback/{id}/review`（hr_admin）。
 
 ## 四、连接器 v1 操作速查（管理员）
 
