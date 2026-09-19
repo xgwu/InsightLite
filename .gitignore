@@ -16,3 +16,6 @@ dist/
 
 # LLM 实跑落盘证据（评测证据文件按需手动保留）
 backend/core/_llm10_result.json
+
+# TS 构建产物
+*.tsbuildinfo
