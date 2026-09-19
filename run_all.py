@@ -19,6 +19,9 @@ STEPS = [
     ("backend/core/llm_intent.py",   "LLM 意图层 dry-run（无 Key 也可跑）"),
     ("backend/core/render.py",       "渲染层与 ask() 链路冒烟"),
     ("eval/eval_harness.py",         "eval harness 离线回放（口径一致率基线）"),
+    # W7 权限矩阵门禁：置于单测之后、端到端之前（authz 纪律：决策层+行为层+fail-closed）
+    ("tests/test_perm_matrix.py",    "W7 权限测试矩阵门禁（决策/行为/fail-closed/权威一致性）"),
+    ("tests/test_api_smoke.py",      "W7 API 冒烟（鉴权 fail-closed + 三态行为，离线）"),
 ]
 
 

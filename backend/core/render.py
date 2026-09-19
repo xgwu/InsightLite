@@ -120,8 +120,9 @@ def _answer_compare(smq, conn, verdict=None):
     base_smq = {k: v for k, v in smq.items() if k != "compare_to"}
     base_smq.pop("limit", None)                       # 合并后统一按原 limit 截断
     prev_smq = copy.deepcopy(base_smq)
-    sql_cur, _ = C.compile_smq(base_smq, month_back=0)
-    sql_prev, _ = C.compile_smq(prev_smq, month_back=n)
+    policy = (verdict or {}).get("policy")            # 策略产物对平移副本同样生效（字段/角色面不变）
+    sql_cur, _ = C.compile_smq(base_smq, month_back=0, policy=policy)
+    sql_prev, _ = C.compile_smq(prev_smq, month_back=n, policy=policy)
     lite_cur = __import__("sqlglot").transpile(sql_cur, read="postgres", write="sqlite")[0]
     lite_prev = __import__("sqlglot").transpile(sql_prev, read="postgres", write="sqlite")[0]
     rows_cur = conn.execute(lite_cur).fetchall()
@@ -193,7 +194,7 @@ def ask(question: str, api_key: str, ctx: dict, conn: sqlite3.Connection = None)
                     "text": f"没有权限执行该查询（{verdict['reason']}）。"}
         if smq.get("compare_to"):                                       # 环节3-5: 环比双查询路径
             return _answer_compare(smq, c, verdict)
-        sql, _ast = C.compile_smq(smq)                                  # 环节3+4: 校验+确定性编译
+        sql, _ast = C.compile_smq(smq, policy=verdict.get("policy"))   # 环节3+4: 校验+确定性编译（消费策略产物）
         sql_lite = __import__("sqlglot").transpile(sql, read="postgres", write="sqlite")[0]
         rows = c.execute(sql_lite).fetchall()                           # 环节5: 真实执行
         total = len(rows)

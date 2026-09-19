@@ -1,0 +1,11 @@
+# InsightLite 后端依赖（锁版本：CI 结果与本机可比）
+# Python >= 3.13；安装到隔离 venv，勿全局安装
+PyYAML==6.0.3
+sqlglot==30.18.0
+openpyxl==3.1.5
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn==0.53.0
+httpx==0.28.1
+pydantic==2.13.5
+anyio==4.15.1

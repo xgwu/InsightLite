@@ -83,18 +83,62 @@ def _col_expr(ds, spec):
     return f"{agg.upper()}({S.colref(ds, field)})", f"{agg}_{field}"
 
 
-def render_sql(smq: dict, anchor: _dt.date = None, month_back: int = 0) -> str:
+def _masked_expr(spec, masked):
+    """列遮蔽表达式（纪律 23：只换值、不换形状）。
+    值列 -> NULL AS；聚合列 -> MAX(NULL) AS（保留聚合语义，行数不退化：
+    AVG(NULL)/COUNT(NULL) 会分别丢口径/得 0，0 是「值为 0」不是「值被扣留」）。"""
+    field = spec if isinstance(spec, str) else spec["field"]
+    if field not in masked:
+        return None
+    agg = None if isinstance(spec, str) else spec.get("agg")
+    return ("MAX(NULL)" if agg else "NULL")
+
+
+def _inline_params(cond):
+    """row_cond (?, [params]) -> 字面值内联文本（编译产物是纯文本 SQL）。"""
+    text, params = cond
+    if not params:
+        return text
+    out, idx = [], 0
+    for ch in text:
+        if ch == "?":
+            out.append(_lit(params[idx]))
+            idx += 1
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def render_sql(smq: dict, anchor: _dt.date = None, month_back: int = 0, policy: dict = None) -> str:
     """SMQ -> PostgreSQL 文本（确定性、纯函数）。调用方需先 validate。
     anchor：相对时间锚点（缺省 = 今天）；time_window 预设由它展开，保证同输入同输出。
-    month_back：环比平移（>0 时 time_window 整体前移 N 个月），仅由对话层 compare 逻辑使用。"""
+    month_back：环比平移（>0 时 time_window 整体前移 N 个月），仅由对话层 compare 逻辑使用。
+    policy：perm_engine.decide 产出的策略产物（只消费、不自判，纪律 8）：
+      row_cond (text, params) 行级条件在编译期注入 WHERE；masked 待遮蔽字段集合在编译期 NULL 化。
+      权限只在构造请求/编译期注入——「先取全量再过滤」从此是缺陷，不是实现方式。"""
     if anchor is None:
         anchor = _dt.date.today()
     ds = smq["dataset"]
+    policy = policy or {}
+    masked = set(policy.get("masked") or [])
+    row_cond = _inline_params(policy["row_cond"]) if policy.get("row_cond") else None
+
     cols, aliases = [], []
     for spec in smq["columns"]:
-        e, a = _col_expr(ds, spec)
-        cols.append(f'{e} AS "{a}"')
-        aliases.append(a)
+        if isinstance(spec, str):
+            field = spec
+        else:
+            field = spec["field"]
+        m = _masked_expr(spec, masked)
+        if m is not None:
+            alias = field if isinstance(spec, str) else spec.get("field")
+            if not isinstance(spec, str) and spec.get("agg"):
+                alias = f"{spec['agg']}_{field}"
+            cols.append(f'{m} AS "{alias}"')
+        else:
+            e, a = _col_expr(ds, spec)
+            cols.append(f'{e} AS "{a}"')
+        aliases.append(field)
 
     sql = f"SELECT {', '.join(cols)} FROM {ds} AS t"
     for tbl, alias, on in S.JOIN_PATHS[ds]:
@@ -111,6 +155,8 @@ def render_sql(smq: dict, anchor: _dt.date = None, month_back: int = 0) -> str:
             conds.append(f"{col} {op} {_lit(f['value'])}")
     if smq.get("time_window"):
         conds.extend(expand_time_window(ds, smq["time_window"], anchor, month_back=month_back))
+    if row_cond:
+        conds.append(row_cond)                     # 行级策略：编译期注入，授权先于检索
     if conds:
         sql += " WHERE " + " AND ".join(conds)
 
@@ -131,12 +177,13 @@ def render_sql(smq: dict, anchor: _dt.date = None, month_back: int = 0) -> str:
     return sql
 
 
-def compile_smq(smq: dict, read: str = "postgres", anchor: _dt.date = None, month_back: int = 0):
+def compile_smq(smq: dict, read: str = "postgres", anchor: _dt.date = None, month_back: int = 0, policy: dict = None):
     """validate -> render -> AST 验证。返回 (sql_text, ast)。任何失败=显式异常。
     compare_to 不在本层展开——环比由对话层跑两条平移 SQL（month_back=0 / N）后
-    在结果侧计算差值（见 render.py），权限只需对基础 SMQ 决策一次。"""
+    在结果侧计算差值（见 render.py），权限只需对基础 SMQ 决策一次；
+    policy（行级/遮蔽产物）对两条平移 SQL 同样生效（字段/角色面不变）。"""
     S.validate(smq)
-    sql = render_sql(smq, anchor, month_back=month_back)
+    sql = render_sql(smq, anchor, month_back=month_back, policy=policy)
     ast = sqlglot.parse_one(sql, read=read)          # 语法/AST 验证，失败抛 ParseError
     return sql, ast
 

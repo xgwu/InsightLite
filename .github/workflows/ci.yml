@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install deps (pinned)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run self-check (seed -> unit -> perm matrix -> eval -> api smoke)
+        id: selfcheck
+        run: |
+          python run_all.py 2>&1 | tee run_all_output.txt
+          # run_all 内部含权限矩阵门禁；退出码非 0 即失败
+          exit ${PIPESTATUS[0]}
+
+      - name: Permission matrix summary (Job Summary)
+        if: always()
+        run: |
+          {
+            echo "## W7 权限测试矩阵"
+            echo '```'
+            grep -A 60 "W7 权限测试矩阵" run_all_output.txt || true
+            echo '```'
+            echo "## API 冒烟"
+            echo '```'
+            grep -B1 -A 20 "API SMOKE" run_all_output.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Annotate open P0 defects
+        if: always()
+        run: |
+          # 开放 P0 缺陷必须浮出到 annotation（不藏在绿色构建里）
+          if grep -q "缺陷登记表" run_all_output.txt; then
+            grep -E "^\s+\[P0\]" run_all_output.txt | while IFS= read -r line; do
+              echo "::warning title=Permission matrix P0 defect::${line#*[P0] }"
+            done
+          fi

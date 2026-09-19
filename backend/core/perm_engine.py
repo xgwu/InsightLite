@@ -54,23 +54,36 @@ def dept_subtree(conn: sqlite3.Connection, dept_id: int):
     return sorted(set(ids) | {dept_id})
 
 
+_ROW_ANCHOR = {          # 行锚点别名（纪律 8：单一权威，行级策略与哨兵共用）
+    "employee": "t",     # 主表自身行
+    "attendance": "e",   # 事实表经 join 的 employee 别名
+    "leave_balance": "e",
+    "payroll": "e",
+    "department": None,  # 无个人行的数据集：不适用行级条件（注入即「不越权但 500」缺口）
+}
+
+
 def row_policy(conn: sqlite3.Connection, ds: str, ctx: dict):
     """行级策略 -> SQL 条件文本（含参数值）或 None（无约束）。
+    行锚点别名按数据集取自 _ROW_ANCHOR（employee 主表是 t，事实表是 e，department 不注入）。
     ctx.role 非法时抛 PermError（fail-closed 由 decide 统一处理为 DENY）。"""
     role = ctx.get("role")
     if role not in dsl_loader.REG.roles:
         raise PermError(f"unknown role: {role!r}")
+    anchor = _ROW_ANCHOR.get(ds)
+    if anchor is None:
+        return None                                # 无个人行数据集：不注入（跳过）
     if role == "employee":
         emp = ctx.get("emp_id")
         if emp is None:
             raise PermError("employee role requires ctx.emp_id")
-        return ("e.id = ?", [emp])
+        return (f'{anchor}."id" = ?', [emp])
     if role == "dept_manager":
         dept = ctx.get("dept_id")
         if dept is None:
             raise PermError("dept_manager role requires ctx.dept_id")
         ids = dept_subtree(conn, dept)
-        return (f"e.dept_id IN ({','.join('?' * len(ids))})", ids)
+        return (f'{anchor}."dept_id" IN ({",".join("?" * len(ids))})', ids)
     if role == "hr_admin":
         return None
     return ("1 = 0", [])          # auditor / scope none：显式空集
@@ -118,10 +131,7 @@ def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
         name_filters = [f for f in smq.get("filter") or []
                         if f.get("field") == "name" and f.get("op") == "eq"]
         if name_filters:
-            own_conn = conn or sqlite3.connect(
-                __import__("os").path.join(
-                    __import__("os").path.dirname(__import__("os").path.dirname(
-                        __import__("os").path.abspath(__file__))), "data", "hr_demo.db"))
+            own_conn = conn or _fallback_conn()
             try:
                 row = own_conn.execute("SELECT name FROM employee WHERE id = ?",
                                        (ctx.get("emp_id"),)).fetchone()
@@ -136,9 +146,31 @@ def decide(smq: dict, ctx: dict, conn: sqlite3.Connection = None) -> dict:
                             "model_version": version}
 
     masked = mask_fields(ds, role, out_fields)
+
+    # ---- 策略产物（纪律 8 架构约束）：决策产出可执行产物，编译层只能消费、不得自行判定
+    row_cond = None
+    if ds in _ROW_ANCHOR and _ROW_ANCHOR[ds] is not None:
+        try:
+            row_cond = row_policy(conn if conn is not None else _fallback_conn(), ds, ctx)
+        except PermError as e:                     # 双 fail-closed：缺主体上下文 -> 显式 DENY
+            return {"decision": "DENY", "reason": f"row policy: {e}", "model_version": version}
+
+    policy = {"row_cond": row_cond, "masked": masked}
     if masked:
-        return {"decision": "MASK", "reason": f"masked columns: {masked}", "model_version": version}
-    return {"decision": "ALLOW", "reason": "no restricted access", "model_version": version}
+        return {"decision": "MASK", "reason": f"masked columns: {masked}",
+                "policy": policy, "model_version": version}
+    return {"decision": "ALLOW", "reason": "no restricted access",
+            "policy": policy, "model_version": version}
+
+
+def _fallback_conn():
+    """调用方未传 conn 时的降级连接（R4 姓名比对 / dept_subtree 闭包用）。"""
+    return sqlite3.connect(
+        __import__("os").path.join(
+            __import__("os").path.dirname(__import__("os").path.dirname(
+                __import__("os").path.dirname(
+                    __import__("os").path.abspath(__file__)))),
+            "data", "hr_demo.db"))
 
 
 if __name__ == "__main__":
