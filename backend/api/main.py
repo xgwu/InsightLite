@@ -43,8 +43,8 @@ from schemas import AskRequest, DevLoginRequest, QueryRequest, QueryResponse  # 
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(CORE)), "data", "hr_demo.db")
 
-app = FastAPI(title="InsightLite API", version="0.3.0-w9",
-              description="轻量级 ChatBI：语义 YAML + SMQ 确定性编译 + 三态权限策略引擎")
+app = FastAPI(title="InsightLite API", version="0.4.0-w10",
+              description="轻量级 ChatBI：语义 YAML + SMQ 确定性编译 + 三态权限策略引擎 + REST 拉取连接器")
 
 
 @app.get("/healthz")
@@ -215,3 +215,36 @@ def dev_login(req: DevLoginRequest):
 from dashboard import router as dashboard_router  # noqa: E402
 
 app.include_router(dashboard_router)
+
+# W10 连接器路由 + FR-12 审计可操作入口 +（可选）定时同步调度线程
+from connectors import router as connectors_router  # noqa: E402
+import connector as CC  # noqa: E402
+
+app.include_router(connectors_router)
+
+
+@app.get("/audit/recent")
+def audit_recent(limit: int = 50, ctx: dict = Depends(build_ctx)):
+    """FR-12 补偿措施「在产品内可操作」（M4 验收项）：豁免审计最近 N 条。
+    仅 hr_admin；append-only JSONL 按月滚动，此处跨文件倒序合并只读。"""
+    if ctx.get("role") != "hr_admin":
+        raise HTTPException(status_code=403, detail="audit review requires hr_admin role")
+    limit = max(1, min(limit, 500))
+    entries = []
+    if os.path.isdir(A.AUDIT_DIR):
+        for fn in sorted(os.listdir(A.AUDIT_DIR), reverse=True):
+            if not fn.endswith(".jsonl"):
+                continue
+            with open(os.path.join(A.AUDIT_DIR, fn), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue            # 半写行跳过（append-only 的边界容忍）
+    entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return {"total_shown": len(entries[:limit]), "entries": entries[:limit]}
+
+
+CC.start_scheduler(lambda: sqlite3.connect(DB_PATH))   # env CONNECTOR_SCHEDULER=1 才启动

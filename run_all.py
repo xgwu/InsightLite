@@ -23,6 +23,7 @@ STEPS = [
     ("tests/test_perm_matrix.py",    "W7 权限测试矩阵门禁（决策/行为/fail-closed/权威一致性/D4 豁免审计）"),
     ("tests/test_orchestrator.py",   "D3 PydanticAI 编排层（TestModel 离线：三分支契约+不可信输入）"),
     ("tests/test_api_smoke.py",      "W7 API 冒烟（鉴权 fail-closed + 三态行为，离线）"),
+    ("tests/test_connector.py",      "W10 连接器（分页/重试告警/staging/推断确认/API 权限/审计入口，离线）"),
 ]
 
 
