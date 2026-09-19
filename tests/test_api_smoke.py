@@ -10,6 +10,7 @@ W7 API 冒烟（离线，无 LLM Key）：FastAPI /query /ask /datasets /healthz
   A6 非法 SMQ -> 422
 """
 import os
+import sqlite3
 import sys
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -85,7 +86,6 @@ def seg_a():
     r = client.post("/query", headers=_auth(TOK_MGR), json={"smq": smq_dept})
     body = r.json()
     # oracle：部门 2 子树的考勤行数（矩阵 C2 同源；明细查询，total = 行数）
-    import sqlite3
     conn = sqlite3.connect(os.path.join(BASE, "data", "hr_demo.db"))
     oracle = conn.execute(
         "SELECT COUNT(*) FROM attendance WHERE emp_id IN "
@@ -137,8 +137,82 @@ def seg_a():
           f"{r.status_code} {body.get('status')}")
 
 
+def seg_b_w8():
+    print("== B W8：dev 登录 / 结构化数据 / SSE ==")
+    # B1 /dev/login：5 角色可签发且可验证；白名单外 403
+    import config
+    for role in ("employee", "manager", "hrbp", "exec", "auditor"):
+        r = client.post("/dev/login", json={"role": role})
+        tok = r.json().get("token", "")
+        check(f"B1 /dev/login {role} 签发+验证", r.status_code == 200
+              and sso_mock.verify(tok) is not None, f"{r.status_code}")
+    r = client.post("/dev/login", json={"role": "superadmin"})
+    check("B1 /dev/login 白名单外 -> 403", r.status_code == 403, str(r.status_code))
+
+    # B2 /query 结构化 data（W8 图表源）
+    r = client.post("/dev/login", json={"role": "hrbp"})
+    tok_admin = r.json()["token"]
+    smq_grp = {"dataset": "employee",
+               "columns": ["dept_name", {"field": "id", "agg": "count"}],
+               "group_by": ["dept_name"]}
+    r = client.post("/query", headers=_auth(tok_admin), json={"smq": smq_grp})
+    body = r.json()
+    data = body.get("data") or {}
+    check("B2 /query 返回结构化 data（columns+rows）",
+          len(data.get("columns", [])) == 2 and len(data.get("rows", [])) == 9
+          and body.get("total") == 9,
+          f"cols={data.get('columns')} rows={len(data.get('rows', []))} total={body.get('total')}")
+
+    # B3 SSE：intent_fn 注入（离线全管线，与线上同代码路径）
+    from main import sse_events
+    import json as _json
+    conn = sqlite3.connect(os.path.join(BASE, "data", "hr_demo.db"))
+    smq_sse = {"dataset": "employee",
+               "columns": ["dept_name", {"field": "id", "agg": "count"}],
+               "group_by": ["dept_name"]}
+    events = [ _json.loads(e[len("data: "):].strip())
+               for e in sse_events("各部门人数", {"role": "hr_admin"}, "KEY",
+                                  intent_fn=lambda q: ("smq", smq_sse), conn=conn) ]
+    stages = [e.get("stage") for e in events]
+    final = events[-1]
+    check("B3 SSE 事件序列 intent->permission->execute->final",
+          stages == ["intent", "permission", "execute", "final"], str(stages))
+    check("B3 SSE final 含 answered+data+sql+total",
+          final.get("status") == "answered" and final.get("data")
+          and final.get("sql") and final.get("total") == 9,
+          f"{final.get('status')} total={final.get('total')}")
+    check("B3 SSE permission 事件附 SMQ（前端口径展示）",
+          events[1].get("smq") == smq_sse)
+
+    # B4 SSE clarify 分支：澄清绝不触库（无 execute 阶段）
+    events = [ _json.loads(e[len("data: "):].strip())
+               for e in sse_events("上个月", {"role": "hr_admin"}, "KEY",
+                                  intent_fn=lambda q: ("clarify", {"question": "哪个月?", "options": ["8月", "9月"]}),
+                                  conn=conn) ]
+    check("B4 SSE clarify -> final（无 execute）",
+          [e.get("stage") for e in events] == ["intent", "final"]
+          and events[-1]["status"] == "clarify")
+
+    # B5 SSE denied 分支：R4 拒绝不触库
+    events = [ _json.loads(e[len("data: "):].strip())
+               for e in sse_events("李娜的工资", {"role": "employee", "emp_id": 1001}, "KEY",
+                                  intent_fn=lambda q: ("smq", {"dataset": "payroll", "columns": ["net_pay"],
+                                                               "filter": [{"field": "name", "op": "eq", "value": "刘杰"}]}),
+                                  conn=conn) ]
+    check("B5 SSE denied -> final（无 execute，DENY 归因 R4）",
+          events[-1].get("status") == "denied"
+          and "execute" not in [e.get("stage") for e in events],
+          str(events[-1])[:100])
+    conn.close()
+
+    # B6 /ask/stream 无 Key -> 503（流开始前显式失败）
+    r = client.post("/ask/stream", headers=_auth(TOK_ADMIN), json={"question": "8 月迟到几次"})
+    check("B6 /ask/stream 无 Key -> 503", r.status_code == 503, str(r.status_code))
+
+
 if __name__ == "__main__":
     seg_a()
+    seg_b_w8()
     n_ok = sum(1 for _, ok, _ in RESULTS if ok)
     print(f"\nAPI SMOKE: {n_ok}/{len(RESULTS)} " + ("PASSED" if n_ok == len(RESULTS) else "FAILED"))
     sys.exit(0 if n_ok == len(RESULTS) else 1)

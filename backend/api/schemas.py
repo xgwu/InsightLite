@@ -14,6 +14,11 @@ class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=500)
 
 
+class DevLoginRequest(BaseModel):
+    """mock SSO 签发请求（Sprint 0 缝线，W8）。"""
+    role: str = Field(..., description="sso_mock 角色：employee/manager/hrbp/exec/auditor")
+
+
 class DecisionInfo(BaseModel):
     decision: str
     reason: str = ""
@@ -21,13 +26,14 @@ class DecisionInfo(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    status: str                       # answered / denied / error
+    status: str                       # answered / denied / refused_scope / clarify / error
     decision: Optional[str] = None    # ALLOW / MASK / DENY
     reason: str = ""
     text: str = ""
     sql: Optional[str] = None
     smq: Optional[dict] = None
     total: Optional[int] = None
+    data: Optional[dict] = None       # 结构化结果 {"columns": [...], "rows": [[...]]}（W8 图表用）
 
 
 class DatasetsResponse(BaseModel):
